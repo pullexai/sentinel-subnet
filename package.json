@@ -1,1 +1,23 @@
-{"name":"@pullexai/sentinel-subnet","version":"0.1.0","type":"module","license":"MIT","packageManager":"bun@1.4.2","exports":{"./release":"./src/release.ts"},"scripts":{"test":"bun test","benchmark":"bun src/benchmark.ts"}}
+{
+  "name": "@pullexai/sentinel-subnet",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "packageManager": "bun@1.4.2",
+  "exports": {
+    "./release": "./src/release.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "check": "tsc -p tsconfig.json && bun test",
+    "benchmark": "bun src/benchmark.ts",
+    "practice:export": "bun src/corpus.ts",
+    "practice:evaluate": "bun src/competition.ts",
+    "miner:practice": "bun src/miner.ts",
+    "validator:practice": "bun src/validator.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "typescript": "7.0.2"
+  }
+}

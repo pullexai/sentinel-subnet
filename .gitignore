@@ -3,3 +3,5 @@ node_modules/
 *.pem
 *.key
 coverage/
+practice.jsonl
+findings.jsonl

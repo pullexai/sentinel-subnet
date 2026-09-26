@@ -1,0 +1,1 @@
+{"schema":"sentinel-literal-miner/v1","rules":[{"id":"double-scale","literal":") * 100;"},{"id":"tenant-key","literal":"const key = id;"},{"id":"path-prefix","literal":"return path.startsWith(root);"},{"id":"expiry-edge","literal":"now <= expires"}]}
