@@ -37,13 +37,14 @@ test('sr25519 challenge binding, durable replay fence and authenticated practice
     inbox.close();inbox=new ContributionInbox(directory,scope,[address,otherAddress],100,()=>now);
     await expect(inbox.accept(envelope,bytes)).rejects.toThrow('replay');
     expect(inbox.candidates()).toEqual([{participant:address,submission:reference}]);
-    const report=await inbox.evaluatePractice('d'.repeat(64),1);
-    expect(report.authentication.scope).toEqual(scope);
-    expect(report.results[0].participants).toEqual([address]);expect(report.results[0].comparison.candidate).toMatchObject({tp:4,fp:0});
     const expired=inbox.issue(otherAddress);now=expired.expiresAt;
     await expect(inbox.accept({...envelope,challenge:expired,signature:Buffer.from(sr25519Sign(contributionPayload(expired,digest),other)).toString('hex')},bytes)).rejects.toThrow('expired');
     const revoked=new ContributionInbox(directory,scope,[otherAddress],100,()=>now);
     try{expect(revoked.candidates()).toEqual([]);await expect(revoked.accept(envelope,bytes)).rejects.toThrow('Ineligible');}finally{revoked.close();}
+    inbox.closePractice('d'.repeat(64),1);
+    const report=await inbox.evaluatePractice();
+    expect(report.authentication.scope).toEqual(scope);
+    expect(report.results[0].participants).toEqual([address]);expect(report.results[0].comparison.candidate).toMatchObject({tp:4,fp:0});
     expect(()=>new ContributionInbox(join(directory,'bad'),{...scope,validator:encodeAddress(validator.publicKey,0)},[address],100)).toThrow();
   }finally{inbox.close();await rm(directory,{recursive:true,force:true});}
 });
