@@ -3,18 +3,20 @@ import {cryptoWaitReady,encodeAddress,sr25519PairFromSeed,sr25519Sign} from '@po
 import {randomBytes} from 'node:crypto';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {join} from 'node:path';
-import {ContributionInbox,challengePayload,contributionPayload,sha256,verifyChallenge,type Scope} from '../src/protocol';
+import {ContributionInbox,challengePayload,contributionPayload,sha256,verifyChallenge,practiceContract,practiceRound,type Scope} from '../src/protocol';
 import {reference} from '../src/competition';
 
 test('sr25519 challenge binding, durable replay fence and authenticated practice evaluation',async()=>{
   await cryptoWaitReady();
   const validator=sr25519PairFromSeed(randomBytes(32)),miner=sr25519PairFromSeed(randomBytes(32)),other=sr25519PairFromSeed(randomBytes(32));
   const address=encodeAddress(miner.publicKey,42),otherAddress=encodeAddress(other.publicKey,42);
-  const scope:Scope={genesis:'a'.repeat(64),netuid:7,round:'b'.repeat(64),validator:encodeAddress(validator.publicKey,42)};
+  const contract=practiceContract('d'.repeat(64),'e'.repeat(64),1);
+  const scope:Scope={genesis:'a'.repeat(64),netuid:7,round:practiceRound(contract),validator:encodeAddress(validator.publicKey,42)};
   const directory=await mkdtemp('/tmp/opencode/subnet-protocol-');let now=1000;
   let inbox=new ContributionInbox(directory,scope,[address,otherAddress],100,()=>now);
   const bytes=Buffer.from(JSON.stringify(reference)),digest=sha256(bytes);
   try{
+    inbox.registerPractice(contract);
     const c=inbox.issue(address);expect(inbox.issue(address)).toEqual(c);
     const signed={challenge:c,signature:Buffer.from(sr25519Sign(challengePayload(c),validator)).toString('hex')};
     expect(await verifyChallenge(signed,scope,address,now,100)).toEqual(c);
@@ -41,7 +43,7 @@ test('sr25519 challenge binding, durable replay fence and authenticated practice
     await expect(inbox.accept({...envelope,challenge:expired,signature:Buffer.from(sr25519Sign(contributionPayload(expired,digest),other)).toString('hex')},bytes)).rejects.toThrow('expired');
     const revoked=new ContributionInbox(directory,scope,[otherAddress],100,()=>now);
     try{expect(revoked.candidates()).toEqual([]);await expect(revoked.accept(envelope,bytes)).rejects.toThrow('Ineligible');}finally{revoked.close();}
-    inbox.closePractice('d'.repeat(64),1);
+    inbox.closePractice('d'.repeat(64),1,'e'.repeat(64));
     const report=await inbox.evaluatePractice();
     expect(report.authentication.scope).toEqual(scope);
     expect(report.results[0].participants).toEqual([address]);expect(report.results[0].comparison.candidate).toMatchObject({tp:4,fp:0});

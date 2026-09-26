@@ -11,10 +11,22 @@ export type SignedChallenge={challenge:Challenge;signature:string};
 export type Contribution={schema:'sentinel-contribution/v1';challenge:Challenge;artifactSha256:string;signature:string};
 export type Scope={genesis:string;netuid:number;round:string;validator:string};
 type FrozenPractice={schema:'sentinel-frozen-practice/v1';scope:Scope;seed:string;pairs:number;generator:string;fixtureSha256:string;baseline:string;
-  scorer:string;eligible:string[];closedAt:number;contributions:{miner:string;challenge:Challenge;artifactSha256:string;signature:string;submission:Submission}[]};
+  salt:string;contract:PracticeContract;scorer:string;eligible:string[];closedAt:number;contributions:{miner:string;challenge:Challenge;artifactSha256:string;signature:string;submission:Submission}[]};
+export type PracticeContract={schema:'sentinel-practice-contract/v1';commitment:string;pairs:number;generator:'sentinel-corpus/v1';baseline:string;scorer:'sentinel-pareto/v1'};
 const hex=/^[a-f0-9]{64}$/;
 const exact=(value:unknown,keys:string[]):value is Record<string,unknown>=>!!value && typeof value==='object' && !Array.isArray(value) && Object.keys(value).length===keys.length && keys.every(k=>Object.hasOwn(value,k));
 export const sha256=(bytes:Uint8Array)=>createHash('sha256').update(bytes).digest('hex');
+export function practiceContract(seed:string,salt:string,pairs:number):PracticeContract{
+  if(typeof seed!=='string' || typeof salt!=='string' || !hex.test(seed) || !hex.test(salt) || !Number.isSafeInteger(pairs) || pairs<1 || pairs>250)throw new Error('Invalid practice commitment inputs');
+  return {schema:'sentinel-practice-contract/v1',commitment:sha256(Buffer.from('sentinel/practice-reveal/v1\n'+JSON.stringify([seed,salt,pairs]))),
+    pairs,generator:'sentinel-corpus/v1',baseline:executionIdentity(reference),scorer:'sentinel-pareto/v1'};
+}
+export function practiceRound(value:unknown):string{
+  if(!exact(value,['schema','commitment','pairs','generator','baseline','scorer']) || value.schema!=='sentinel-practice-contract/v1' ||
+    typeof value.commitment!=='string' || !hex.test(value.commitment) || typeof value.pairs!=='number' || !Number.isSafeInteger(value.pairs) || value.pairs<1 || value.pairs>250 ||
+    value.generator!=='sentinel-corpus/v1' || value.baseline!==executionIdentity(reference) || value.scorer!=='sentinel-pareto/v1')throw new Error('Invalid practice contract');
+  return sha256(Buffer.from('sentinel/practice-contract/v1\n'+JSON.stringify([value.schema,value.commitment,value.pairs,value.generator,value.baseline,value.scorer])));
+}
 function hotkey(value:unknown):value is string{
   try{return typeof value==='string' && value.length===48 && encodeAddress(decodeAddress(value,false,42),42)===value;}catch{return false;}
 }
@@ -70,14 +82,32 @@ export class ContributionInbox{
     this.db=new Database(path,{create:true,strict:true});
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS challenges(scope TEXT NOT NULL,miner TEXT NOT NULL,nonce TEXT NOT NULL UNIQUE,challenge TEXT NOT NULL,artifact TEXT,digest TEXT,signature TEXT,accepted_at INTEGER,PRIMARY KEY(scope,miner));
-      CREATE TABLE IF NOT EXISTS frozen_practice(scope TEXT PRIMARY KEY,body TEXT NOT NULL,digest TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS frozen_practice(scope TEXT PRIMARY KEY,body TEXT NOT NULL,digest TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS practice_contracts(scope TEXT PRIMARY KEY,body TEXT NOT NULL);`);
   }
   private scopeId(){return JSON.stringify([this.policy.genesis,this.policy.netuid,this.policy.round,this.policy.validator]);}
   private ensureOpen(){if(this.db.query('SELECT 1 FROM frozen_practice WHERE scope=?').get(this.scopeId()))throw new Error('Practice cohort closed');}
+  registerPractice(contract:PracticeContract){
+    if(practiceRound(contract)!==this.policy.round)throw new Error('Practice round commitment mismatch');
+    return this.db.transaction(()=>{
+      const existing=this.db.query('SELECT body FROM practice_contracts WHERE scope=?').get(this.scopeId()) as {body:string}|null;
+      if(existing){if(practiceRound(JSON.parse(existing.body))!==this.policy.round)throw new Error('Stored practice contract mismatch');return this.policy.round;}
+      if(this.db.query('SELECT 1 FROM challenges WHERE scope=?').get(this.scopeId()) || this.db.query('SELECT 1 FROM frozen_practice WHERE scope=?').get(this.scopeId()))throw new Error('Cannot retroactively commit practice');
+      this.db.query('INSERT INTO practice_contracts(scope,body) VALUES(?,?)').run(this.scopeId(),JSON.stringify(contract));return this.policy.round;
+    }).immediate();
+  }
+  private committedPractice(){
+    const row=this.db.query('SELECT body FROM practice_contracts WHERE scope=?').get(this.scopeId()) as {body:string}|null;
+    if(!row)throw new Error('Commit practice before admission');
+    const contract=JSON.parse(row.body) as PracticeContract;
+    if(practiceRound(contract)!==this.policy.round)throw new Error('Stored practice contract mismatch');
+    return contract;
+  }
   issue(miner:string):Challenge{
     if(!this.miners.has(miner))throw new Error('Ineligible hotkey');
     return this.db.transaction(()=>{
       this.ensureOpen();
+      this.committedPractice();
       const existing=this.db.query('SELECT challenge FROM challenges WHERE scope=? AND miner=?').get(this.scopeId(),miner) as {challenge:string}|null;
       if(existing)return JSON.parse(existing.challenge);
       const issuedAt=this.clock();
@@ -95,6 +125,7 @@ export class ContributionInbox{
     signature(payload,value.signature,c.miner);
     return this.db.transaction(()=>{
       this.ensureOpen();
+      this.committedPractice();
       const row=this.db.query('SELECT challenge,artifact FROM challenges WHERE scope=? AND miner=? AND nonce=?').get(this.scopeId(),c.miner,c.nonce) as {challenge:string;artifact:string|null}|null;
       const now=this.clock();
       if(!Number.isSafeInteger(now) || !row || !challengePayload(JSON.parse(row.challenge)).equals(challengePayload(c)) || now<c.issuedAt || now>=c.expiresAt)throw new Error('Unknown or expired challenge');
@@ -107,9 +138,12 @@ export class ContributionInbox{
     const rows=this.db.query('SELECT miner,artifact FROM challenges WHERE scope=? AND artifact IS NOT NULL ORDER BY miner').all(this.scopeId()) as {miner:string;artifact:string}[];
     return rows.filter(row=>this.miners.has(row.miner)).map(row=>({participant:row.miner,submission:admit(JSON.parse(row.artifact))}));
   }
-  closePractice(seed:string,pairs:number){
+  closePractice(seed:string,pairs:number,salt:string){
+    const revealed=practiceContract(seed,salt,pairs);
     const fixtureSha256=sha256(Buffer.from(JSON.stringify(corpus(seed,pairs))));
     return this.db.transaction(()=>{
+      this.committedPractice();
+      if(practiceRound(revealed)!==this.policy.round)throw new Error('Practice reveal conflict');
       const stored=this.db.query('SELECT body,digest FROM frozen_practice WHERE scope=?').get(this.scopeId()) as {body:string;digest:string}|null;
       if(stored){
         const frozen=this.readFrozen();
@@ -120,7 +154,7 @@ export class ContributionInbox{
       const contributions=rows.filter(row=>this.miners.has(row.miner)).map(row=>({miner:row.miner,challenge:JSON.parse(row.challenge),artifactSha256:row.digest,signature:row.signature,submission:artifact(Buffer.from(row.artifact))}));
       if(contributions.length<1 || contributions.length>100)throw new Error('Frozen practice requires 1–100 admitted miners');
       const closedAt=this.clock();if(!Number.isSafeInteger(closedAt) || closedAt<0)throw new Error('Invalid closure time');
-      const frozen:FrozenPractice={schema:'sentinel-frozen-practice/v1',scope:{...this.policy},seed,pairs,generator:'sentinel-corpus/v1',fixtureSha256,
+      const frozen:FrozenPractice={schema:'sentinel-frozen-practice/v1',scope:{...this.policy},seed,pairs,salt,contract:revealed,generator:'sentinel-corpus/v1',fixtureSha256,
         baseline:executionIdentity(reference),scorer:'sentinel-pareto/v1',eligible:[...this.miners].sort(),closedAt,contributions};
       const body=JSON.stringify(frozen),digest=sha256(Buffer.from(body));
       this.db.query('INSERT INTO frozen_practice(scope,body,digest) VALUES(?,?,?)').run(this.scopeId(),body,digest);
@@ -132,6 +166,8 @@ export class ContributionInbox{
     if(!stored)throw new Error('Close practice cohort before evaluation');
     if(sha256(Buffer.from(stored.body))!==stored.digest)throw new Error('Frozen practice integrity failure');
     const frozen=JSON.parse(stored.body) as FrozenPractice;
+    this.committedPractice();
+    if(practiceRound(frozen.contract)!==this.policy.round || practiceRound(practiceContract(frozen.seed,frozen.salt,frozen.pairs))!==this.policy.round)throw new Error('Frozen practice commitment mismatch');
     if(JSON.stringify(frozen.eligible)!==JSON.stringify([...this.miners].sort()))throw new Error('Frozen practice eligibility conflict');
     if(frozen.schema!=='sentinel-frozen-practice/v1' || JSON.stringify(frozen.scope)!==JSON.stringify(this.policy) ||
       frozen.generator!=='sentinel-corpus/v1' || frozen.scorer!=='sentinel-pareto/v1' || frozen.baseline!==executionIdentity(reference) ||
@@ -149,6 +185,7 @@ export class ContributionInbox{
     const {evaluateCohort}=await import('./validator');
     const report=await evaluateCohort(frozen.seed,frozen.pairs,frozen.contributions.map(c=>({participant:c.miner,submission:c.submission})));
     return {...report,cohortSha256:sha256(Buffer.from(JSON.stringify(frozen))),closedAt:frozen.closedAt,
+      commitment:frozen.contract,reveal:{seed:frozen.seed,salt:frozen.salt},
       authentication:{scheme:'sr25519',scope:{...this.policy},eligibility:'operator-supplied-hotkey-list'},
       limitation:'Signed public-template practice. Key possession verified; chain registration, validator independence and hidden generalization unqualified. No weights or rewards.'};
   }
