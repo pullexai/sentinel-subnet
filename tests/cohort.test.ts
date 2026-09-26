@@ -2,9 +2,9 @@ import {expect,test} from 'bun:test';
 import {Database} from 'bun:sqlite';
 import {cryptoWaitReady,encodeAddress,sr25519PairFromSeed,sr25519Sign} from '@polkadot/util-crypto';
 import {randomBytes} from 'node:crypto';
-import {mkdtemp,rm} from 'node:fs/promises';
+import {mkdtemp,rm,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {ContributionInbox,contributionPayload,sha256,practiceContract,practiceRound,type Scope} from '../src/protocol';
+import {ContributionInbox,contributionPayload,sha256,practiceContract,practiceRound,evaluateSnapshot,snapshotByteLimit,type Scope} from '../src/protocol';
 import {reference} from '../src/competition';
 import {scoreTarget,scoreAttestationPayload,quorumPolicyDigest,verifyScoreQuorum} from '../src/attestations';
 
@@ -65,6 +65,32 @@ test('cohort closure freezes contract, signatures and eligibility across concurr
     expect(replay.comparisonId).toBe(report.comparisonId);expect(replay.tiers).toEqual(report.tiers);
     expect(replay.results.map(({resources,...stable})=>stable)).toEqual(report.results.map(({resources,...stable})=>stable));
     const target=scoreTarget(report);expect(scoreTarget(replay)).toEqual(target);
+    const exported=inbox.exportPractice(),expected={cohortSha256:closure.cohortSha256,scope,eligible:addresses};
+    expect(sha256(exported)).toBe(closure.cohortSha256);
+    await expect(evaluateSnapshot(Buffer.from('{}'),expected)).rejects.toThrow('digest');
+    await expect(evaluateSnapshot(Buffer.alloc(snapshotByteLimit+1),expected)).rejects.toThrow('byte limit');
+    for(const altered of [{...expected,scope:{...scope,netuid:10}},{...expected,eligible:[addresses[0]]},{...expected,extra:1}])await expect(evaluateSnapshot(exported,altered)).rejects.toThrow();
+    const mutate=async(change:(value:any)=>void)=>{
+      const value=JSON.parse(exported.toString());change(value);const bytes=Buffer.from(JSON.stringify(value));
+      // Even when bytes are deliberately approved, malformed content must fail before fixture execution.
+      await expect(evaluateSnapshot(bytes,{...expected,cohortSha256:sha256(bytes)})).rejects.toThrow();
+    };
+    await mutate(v=>v.extra=true);
+    await mutate(v=>v.contributions.push(v.contributions[0]));
+    await mutate(v=>v.contributions[0].signature='0'.repeat(128));
+    await mutate(v=>v.contributions[0].challenge.netuid=10);
+    await mutate(v=>v.contributions[0].submission.rules[0].literal='tampered');
+    await mutate(v=>v.fixtureSha256='0'.repeat(64));
+    await mutate(v=>v.salt='a'.repeat(64));
+    await mutate(v=>v.closedAt=0);
+    const duplicate=Buffer.from(exported.toString().replace('{','{"schema":"sentinel-frozen-practice/v1",'));
+    await expect(evaluateSnapshot(duplicate,{...expected,cohortSha256:sha256(duplicate)})).rejects.toThrow('noncanonical');
+    const snapshotPath=join(directory,'snapshot.json'),expectedPath=join(directory,'expected.json');
+    await writeFile(snapshotPath,exported,{mode:0o600});await writeFile(expectedPath,JSON.stringify(expected),{mode:0o600});
+    const child=Bun.spawn(['bun',new URL('../src/replay.ts',import.meta.url).pathname,snapshotPath,expectedPath],{cwd:'/tmp/opencode',stdout:'pipe',stderr:'pipe'});
+    const output=await new Response(child.stdout).text(),stderr=await new Response(child.stderr).text();
+    expect(await child.exited).toBe(0);expect(stderr).toBe('');
+    expect(JSON.parse(output).target).toEqual(target);
     const changedScore=structuredClone(replay);changedScore.results[0].comparison.candidate.tp--;
     expect(scoreTarget(changedScore).resultSha256).not.toBe(target.resultSha256);
     const quorum={validators:addresses.slice(1),threshold:2},policySha256=quorumPolicyDigest(quorum);

@@ -4,7 +4,7 @@
 
 ## Use
 
-Each reviewer must obtain and independently verify the same closed inbox snapshot and recompute it with the qualified implementation. Current tests recompute with the same local code; they do not qualify independent validator operators.
+Each reviewer must obtain and independently verify the same closed inbox snapshot and recompute it with the qualified implementation. [REPLAY.md](REPLAY.md) provides export and database-independent replay against separately trusted expectations. Tests recompute in separate local processes using the same code; they do not qualify independent validator operators.
 
 ```ts
 const report = await inbox.evaluatePractice();

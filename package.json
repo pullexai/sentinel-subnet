@@ -14,7 +14,8 @@
     "practice:export": "bun src/corpus.ts",
     "practice:evaluate": "bun src/competition.ts",
     "miner:practice": "bun src/miner.ts",
-    "validator:practice": "bun src/validator.ts"
+    "validator:practice": "bun src/validator.ts",
+    "validator:replay": "bun src/replay.ts"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",
