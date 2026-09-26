@@ -1,0 +1,1 @@
+{"name":"@pullexai/sentinel-subnet","version":"0.1.0","type":"module","license":"MIT","packageManager":"bun@1.4.2","exports":{"./release":"./src/release.ts"},"scripts":{"test":"bun test","benchmark":"bun src/benchmark.ts"}}
