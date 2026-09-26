@@ -31,7 +31,11 @@ Reports include TP/FP/FN, clean-case false positives, precision/recall, per-fami
 
 ## Required before network readiness
 
-Versioned submission formats and sandboxed artifact evaluation; independent private synthetic families and labels held outside this repository and outside candidate execution; miner/hotkey identity; validator independence; anti-copy/Sybil and leakage controls; calibrated marginal utility and deterministic score reconciliation; actual SDK/runtime-compatible weight planning; empty-cohort policy; crash recovery and operator instructions. No numerical production thresholds or network identity are selected.
+### Authenticated contribution increment
+
+`src/protocol.ts` now provides signed sr25519 validator challenges and miner contribution verification, canonical SS58 hotkeys, exact artifact-digest binding and a persistent transactional replay fence. `ContributionInbox.evaluatePractice` integrates admitted hotkeys with the practice evaluator. Actual Bun/native-Python crypto interoperability passed. See [PROTOCOL.md](PROTOCOL.md) for signature bytes, custody boundary, use and evidence. This is an operator-eligible authenticated lane, not verified Bittensor registration or Axon/Dendrite transport. The existing label-only practice CLI remains available.
+
+Broader versioned submission formats and sandboxed artifact evaluation; independent private synthetic families and labels held outside this repository and outside candidate execution; chain-bound miner/hotkey registration and SDK transport; validator independence; anti-copy/Sybil and leakage controls; calibrated marginal utility and deterministic score reconciliation; actual SDK/runtime-compatible weight planning; empty-cohort policy; full crash recovery and operator instructions. No numerical production thresholds or network identity are selected.
 
 No customer code, metadata, derivatives, telemetry, feedback or customer-derived synthetic cases may enter research storage, validators, training, scoring or public releases. Hidden inputs must be independently synthetic or appropriately licensed public material. A local score is not a finalized chain weight or a reward.
 
