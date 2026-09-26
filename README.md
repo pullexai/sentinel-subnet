@@ -31,6 +31,8 @@ Reports include TP/FP/FN, clean-case false positives, precision/recall, per-fami
 
 ## Required before network readiness
 
+Signed score agreement is available in `src/attestations.ts`: deterministic report targets, domain-separated sr25519 attestations and strict verification against an operator-selected key set/threshold. Duplicate, conflicting and untrusted signatures fail. [ATTESTATIONS.md](ATTESTATIONS.md) specifies bytes, use and limits; key agreement alone is not independent-validator consensus or network finality.
+
 ### Authenticated contribution increment
 
 `src/protocol.ts` now provides signed sr25519 validator challenges and miner contribution verification, canonical SS58 hotkeys, exact artifact-digest binding and a persistent transactional replay fence. `practiceContract`/`practiceRound` commit the benchmark before `registerPractice` permits challenges. `ContributionInbox.closePractice(seed,pairs,salt)` verifies that commitment, durably freezes the eligible cohort and refuses later admissions; `evaluatePractice()` revalidates that snapshot and integrates admitted hotkeys with the practice evaluator, reproducibly after restart. Actual Bun/native-Python crypto interoperability passed. See [PROTOCOL.md](PROTOCOL.md) for signature bytes, custody boundary, use and evidence. This is an operator-eligible authenticated lane, not verified Bittensor registration or Axon/Dendrite transport. The existing label-only practice CLI remains available.

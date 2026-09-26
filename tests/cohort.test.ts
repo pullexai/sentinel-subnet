@@ -6,6 +6,7 @@ import {mkdtemp,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {ContributionInbox,contributionPayload,sha256,practiceContract,practiceRound,type Scope} from '../src/protocol';
 import {reference} from '../src/competition';
+import {scoreTarget,scoreAttestationPayload,quorumPolicyDigest,verifyScoreQuorum} from '../src/attestations';
 
 test('cohort closure freezes contract, signatures and eligibility across concurrent admission and restart',async()=>{
   await cryptoWaitReady();
@@ -63,6 +64,13 @@ test('cohort closure freezes contract, signatures and eligibility across concurr
     expect(replay.cohortSha256).toBe(report.cohortSha256);
     expect(replay.comparisonId).toBe(report.comparisonId);expect(replay.tiers).toEqual(report.tiers);
     expect(replay.results.map(({resources,...stable})=>stable)).toEqual(report.results.map(({resources,...stable})=>stable));
+    const target=scoreTarget(report);expect(scoreTarget(replay)).toEqual(target);
+    const changedScore=structuredClone(replay);changedScore.results[0].comparison.candidate.tp--;
+    expect(scoreTarget(changedScore).resultSha256).not.toBe(target.resultSha256);
+    const quorum={validators:addresses.slice(1),threshold:2},policySha256=quorumPolicyDigest(quorum);
+    const attestations=keys.slice(1).map((key,i)=>({schema:'sentinel-score-attestation/v1',target:scoreTarget(i ? replay : report),policySha256,validator:addresses[i+1],
+      signature:Buffer.from(sr25519Sign(scoreAttestationPayload(target,policySha256,addresses[i+1]),key)).toString('hex')}));
+    expect((await verifyScoreQuorum(attestations,target,quorum)).signers).toHaveLength(2);
     // Closure is an independent retained snapshot, not a later query of mutable admission rows.
     const db=new Database(join(directory,'inbox.sqlite'));
     try{
