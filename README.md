@@ -31,7 +31,7 @@ Reports include TP/FP/FN, clean-case false positives, precision/recall, per-fami
 
 ## Required before network readiness
 
-Signed score agreement is available in `src/attestations.ts`: deterministic report targets, domain-separated sr25519 attestations and strict verification against an operator-selected key set/threshold. Duplicate, conflicting and untrusted signatures fail. [ATTESTATIONS.md](ATTESTATIONS.md) specifies bytes, use and limits; key agreement alone is not independent-validator consensus or network finality.
+Signed score agreement is available in `src/attestations.ts`: deterministic report targets, domain-separated sr25519 attestations and strict verification against an operator-selected key set/threshold. `src/vote-journal.ts` durably retains observed votes/conflict proofs and excludes equivocators without lowering that threshold, including after restart. Duplicate, conflicting and untrusted signatures fail certificate verification. [ATTESTATIONS.md](ATTESTATIONS.md) specifies bytes, use and limits; key agreement alone is not independent-validator consensus or network finality.
 
 ### Authenticated contribution increment
 

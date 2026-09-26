@@ -41,6 +41,17 @@ export function scoreAttestationPayload(target:ScoreTarget,policySha256:string,v
   if(!hex(policySha256) || !address(validator))throw new Error('Invalid score attestation identity');
   return Buffer.from('sentinel/score-attestation/sr25519/v1\n'+JSON.stringify([...targetFields(target),policySha256,validator]));
 }
+function verifyVote(value:unknown,policySha256:string,allowed:Set<string>):asserts value is ScoreAttestation{
+  if(!exact(value,['schema','target','policySha256','validator','signature']) || value.schema!=='sentinel-score-attestation/v1' ||
+    typeof value.validator!=='string' || !allowed.has(value.validator) || value.policySha256!==policySha256 ||
+    typeof value.signature!=='string' || !/^[a-f0-9]{128}$/.test(value.signature))throw new Error('Untrusted score attestation');
+  const payload=scoreAttestationPayload(value.target as ScoreTarget,policySha256,value.validator);
+  if(!sr25519Verify(payload,Buffer.from(value.signature,'hex'),decodeAddress(value.validator,false,42)))throw new Error('Invalid score signature');
+}
+export async function verifyScoreAttestation(value:unknown,policy:QuorumPolicy){
+  const policySha256=quorumPolicyDigest(policy),allowed=new Set(policy.validators),vote=structuredClone(value);
+  await cryptoWaitReady();verifyVote(vote,policySha256,allowed);return vote;
+}
 export async function verifyScoreQuorum(values:unknown,expected:ScoreTarget,policy:QuorumPolicy){
   // Snapshot caller inputs before verifying so asynchronous mutation cannot change expectations.
   const fields=JSON.stringify(targetFields(expected)),target=structuredClone(expected);
@@ -50,10 +61,8 @@ export async function verifyScoreQuorum(values:unknown,expected:ScoreTarget,poli
   await cryptoWaitReady();
   const signers=new Set<string>();
   for(const value of attestations){
-    if(!exact(value,['schema','target','policySha256','validator','signature']) || value.schema!=='sentinel-score-attestation/v1' ||
-      typeof value.validator!=='string' || !allowed.has(value.validator) || signers.has(value.validator) || value.policySha256!==policySha256 ||
-      JSON.stringify(targetFields(value.target))!==fields || typeof value.signature!=='string' || !/^[a-f0-9]{128}$/.test(value.signature))throw new Error('Untrusted, duplicate or conflicting score attestation');
-    if(!sr25519Verify(scoreAttestationPayload(target,policySha256,value.validator),Buffer.from(value.signature,'hex'),decodeAddress(value.validator,false,42)))throw new Error('Invalid score signature');
+    verifyVote(value,policySha256,allowed);
+    if(signers.has(value.validator) || JSON.stringify(targetFields(value.target))!==fields)throw new Error('Duplicate or conflicting score attestation');
     signers.add(value.validator);
   }
   if(signers.size<threshold)throw new Error('Insufficient score attestations');
