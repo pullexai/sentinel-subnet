@@ -43,6 +43,7 @@ test('sr25519 challenge binding, durable replay fence and authenticated practice
     await expect(inbox.accept({...envelope,challenge:expired,signature:Buffer.from(sr25519Sign(contributionPayload(expired,digest),other)).toString('hex')},bytes)).rejects.toThrow('expired');
     const revoked=new ContributionInbox(directory,scope,[otherAddress],100,()=>now);
     try{expect(revoked.candidates()).toEqual([]);await expect(revoked.accept(envelope,bytes)).rejects.toThrow('Ineligible');}finally{revoked.close();}
+    await inbox.attestAdmission(signed,async payload=>Buffer.from(sr25519Sign(payload,validator)).toString('hex'));
     inbox.closePractice('d'.repeat(64),1,'e'.repeat(64));
     const report=await inbox.evaluatePractice();
     expect(report.authentication.scope).toEqual(scope);

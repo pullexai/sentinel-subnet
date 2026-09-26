@@ -4,6 +4,8 @@
 
 ## Flow
 
+Admission-proof update: [ADMISSION.md](ADMISSION.md) requires `attestAdmission(signedChallenge, signer)` after step 7 and before closure. Closed snapshots now use v2 and retain both validator signatures plus declared admission time; older v1 replay is refused. The original signature domains for challenges/contributions remain unchanged.
+
 1. An operator provides the genesis hash (64 lowercase hex characters, without `0x`), netuid, validator SS58 address, eligible miner SS58 addresses and positive challenge lifetime in milliseconds. Before admitting contributions, generate independent synthetic seed and random 32-byte salt, retain them privately, and call `practiceContract(seed,salt,pairs)`. Set `scope.round = practiceRound(contract)`. No defaults select a network, seed or economic policy. No customer-derived seed is permitted.
 2. Construct `ContributionInbox(privateDirectory, scope, eligibleHotkeys, lifetimeMs)`. Keep its SQLite DB/WAL in a dedicated private directory. It rejects exposed directories and symlink/nonregular DB files. Parents and storage remain operator-trusted. Preserve this storage on restart; deleting/restoring stale storage loses replay history.
 3. Call `registerPractice(contract)` before `issue(miner)`. Registration stores only the commitment and public benchmark configuration, not seed/salt. It must match the scope's round hash and cannot occur retroactively once challenges exist. `issue(miner)` persists one random 32-byte nonce per scope/miner before returning. Repeated issue returns the same challenge, including its original expiration. A consumed/expired challenge is not renewed within the round.

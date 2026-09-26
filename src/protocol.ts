@@ -10,8 +10,9 @@ export type Challenge={schema:'sentinel-challenge/v1';genesis:string;netuid:numb
 export type SignedChallenge={challenge:Challenge;signature:string};
 export type Contribution={schema:'sentinel-contribution/v1';challenge:Challenge;artifactSha256:string;signature:string};
 export type Scope={genesis:string;netuid:number;round:string;validator:string};
-type FrozenPractice={schema:'sentinel-frozen-practice/v1';scope:Scope;seed:string;pairs:number;generator:string;fixtureSha256:string;baseline:string;
-  salt:string;contract:PracticeContract;scorer:string;eligible:string[];closedAt:number;contributions:{miner:string;challenge:Challenge;artifactSha256:string;signature:string;submission:Submission}[]};
+type AdmissionProof={challengeSignature:string;acceptedAt:number;receiptSignature:string};
+type FrozenPractice={schema:'sentinel-frozen-practice/v2';scope:Scope;seed:string;pairs:number;generator:string;fixtureSha256:string;baseline:string;
+  salt:string;contract:PracticeContract;scorer:string;eligible:string[];closedAt:number;contributions:{miner:string;challenge:Challenge;artifactSha256:string;signature:string;submission:Submission;admission:AdmissionProof}[]};
 export type PracticeContract={schema:'sentinel-practice-contract/v1';commitment:string;pairs:number;generator:'sentinel-corpus/v1';baseline:string;scorer:'sentinel-pareto/v1'};
 const hex=/^[a-f0-9]{64}$/;
 const exact=(value:unknown,keys:string[]):value is Record<string,unknown>=>!!value && typeof value==='object' && !Array.isArray(value) && Object.keys(value).length===keys.length && keys.every(k=>Object.hasOwn(value,k));
@@ -44,8 +45,15 @@ export function contributionPayload(c:Challenge,artifactSha256:string){
   challenge(c);if(!hex.test(artifactSha256))throw new Error('Invalid artifact digest');
   return Buffer.from('sentinel/contribution/sr25519/v1\n'+JSON.stringify([...fields(c),artifactSha256]));
 }
+export function admissionPayload(c:Challenge,artifactSha256:string,minerSignature:string,acceptedAt:number){
+  challenge(c);
+  if(typeof artifactSha256!=='string' || !hex.test(artifactSha256) || !/^[a-f0-9]{128}$/.test(minerSignature) ||
+    !Number.isSafeInteger(acceptedAt) || acceptedAt<c.issuedAt || acceptedAt>=c.expiresAt)throw new Error('Invalid admission receipt');
+  return Buffer.from('sentinel/admission/sr25519/v1\n'+JSON.stringify([...fields(c),artifactSha256,minerSignature,acceptedAt]));
+}
 function signature(message:Uint8Array,value:unknown,address:string){
-  if(typeof value!=='string' || !/^[a-f0-9]{128}$/.test(value) || !sr25519Verify(message,Buffer.from(value,'hex'),decodeAddress(address,false,42)))throw new Error('Invalid sr25519 signature');
+  try{if(typeof value==='string' && /^[a-f0-9]{128}$/.test(value) && sr25519Verify(message,Buffer.from(value,'hex'),decodeAddress(address,false,42)))return;}catch{}
+  throw new Error('Invalid sr25519 signature');
 }
 export async function verifyChallenge(value:unknown,expected:Scope,miner:string,now:number,maxLifetimeMs:number):Promise<Challenge>{
   await cryptoWaitReady();scope(expected);
@@ -79,7 +87,7 @@ export async function evaluateSnapshot(bytes:Uint8Array,expected:SnapshotExpecta
   const text=new TextDecoder('utf-8',{fatal:true}).decode(input),value=JSON.parse(text);
   if(JSON.stringify(value)!==text || !exact(value,['schema','scope','seed','pairs','salt','contract','generator','fixtureSha256','baseline','scorer','eligible','closedAt','contributions']))throw new Error('Invalid snapshot schema or noncanonical JSON');
   const f=value as unknown as FrozenPractice;
-  if(f.schema!=='sentinel-frozen-practice/v1' || !exact(f.scope,['genesis','netuid','round','validator']) ||
+  if(f.schema!=='sentinel-frozen-practice/v2' || !exact(f.scope,['genesis','netuid','round','validator']) ||
     ['genesis','netuid','round','validator'].some(k=>f.scope[k as keyof Scope]!==expectations.scope[k as keyof Scope]) ||
     !Array.isArray(f.eligible) || JSON.stringify(f.eligible)!==JSON.stringify([...expectations.eligible].sort()) ||
     !Number.isSafeInteger(f.closedAt) || f.closedAt<0 || !Array.isArray(f.contributions) || f.contributions.length<1 || f.contributions.length>100)throw new Error('Snapshot scope or cohort mismatch');
@@ -89,13 +97,17 @@ export async function evaluateSnapshot(bytes:Uint8Array,expected:SnapshotExpecta
   await cryptoWaitReady();
   const miners=new Set<string>(),nonces=new Set<string>();
   for(const contribution of f.contributions){
-    if(!exact(contribution,['miner','challenge','artifactSha256','signature','submission']))throw new Error('Invalid snapshot contribution');
+    if(!exact(contribution,['miner','challenge','artifactSha256','signature','submission','admission']))throw new Error('Invalid snapshot contribution');
     const c=contribution.challenge;challenge(c);
     if(!expectations.eligible.includes(c.miner) || contribution.miner!==c.miner || miners.has(c.miner) || nonces.has(c.nonce) || c.issuedAt>f.closedAt ||
       ['genesis','netuid','round','validator'].some(k=>c[k as keyof Scope]!==expectations.scope[k as keyof Scope]))throw new Error('Snapshot contribution scope mismatch');
     const artifactBytes=Buffer.from(JSON.stringify(contribution.submission));artifact(artifactBytes);
     if(sha256(artifactBytes)!==contribution.artifactSha256)throw new Error('Snapshot artifact mismatch');
     signature(contributionPayload(c,contribution.artifactSha256 as string),contribution.signature,c.miner);
+    const proof=contribution.admission;
+    if(!exact(proof,['challengeSignature','acceptedAt','receiptSignature']) || typeof proof.acceptedAt!=='number' || proof.acceptedAt>f.closedAt)throw new Error('Invalid snapshot admission');
+    signature(challengePayload(c),proof.challengeSignature,c.validator);
+    signature(admissionPayload(c,contribution.artifactSha256 as string,contribution.signature as string,proof.acceptedAt),proof.receiptSignature,c.validator);
     miners.add(c.miner);nonces.add(c.nonce);
   }
   const {evaluateCohort}=await import('./validator');
@@ -122,7 +134,8 @@ export class ContributionInbox{
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS challenges(scope TEXT NOT NULL,miner TEXT NOT NULL,nonce TEXT NOT NULL UNIQUE,challenge TEXT NOT NULL,artifact TEXT,digest TEXT,signature TEXT,accepted_at INTEGER,PRIMARY KEY(scope,miner));
       CREATE TABLE IF NOT EXISTS frozen_practice(scope TEXT PRIMARY KEY,body TEXT NOT NULL,digest TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS practice_contracts(scope TEXT PRIMARY KEY,body TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS practice_contracts(scope TEXT PRIMARY KEY,body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS admission_proofs(scope TEXT NOT NULL,miner TEXT NOT NULL,proof TEXT NOT NULL,PRIMARY KEY(scope,miner));`);
   }
   private scopeId(){return JSON.stringify([this.policy.genesis,this.policy.netuid,this.policy.round,this.policy.validator]);}
   private ensureOpen(){if(this.db.query('SELECT 1 FROM frozen_practice WHERE scope=?').get(this.scopeId()))throw new Error('Practice cohort closed');}
@@ -177,6 +190,30 @@ export class ContributionInbox{
     const rows=this.db.query('SELECT miner,artifact FROM challenges WHERE scope=? AND artifact IS NOT NULL ORDER BY miner').all(this.scopeId()) as {miner:string;artifact:string}[];
     return rows.filter(row=>this.miners.has(row.miner)).map(row=>({participant:row.miner,submission:admit(JSON.parse(row.artifact))}));
   }
+  async attestAdmission(signed:SignedChallenge,sign:(payload:Uint8Array)=>Promise<string>){
+    const value=structuredClone(signed);
+    await cryptoWaitReady();
+    if(!exact(value,['challenge','signature']))throw new Error('Invalid signed challenge');
+    const c=value.challenge;challenge(c);signature(challengePayload(c),value.signature,c.validator);
+    this.ensureOpen();this.committedPractice();
+    if(!this.miners.has(c.miner))throw new Error('Ineligible hotkey');
+    const row=this.db.query('SELECT challenge,digest,signature,accepted_at FROM challenges WHERE scope=? AND miner=? AND artifact IS NOT NULL').get(this.scopeId(),c.miner) as {challenge:string;digest:string;signature:string;accepted_at:number}|null;
+    if(!row || !challengePayload(JSON.parse(row.challenge)).equals(challengePayload(c)))throw new Error('Unknown admitted contribution');
+    const existing=this.db.query('SELECT proof FROM admission_proofs WHERE scope=? AND miner=?').get(this.scopeId(),c.miner) as {proof:string}|null;
+    if(existing)return JSON.parse(existing.proof) as AdmissionProof;
+    const payload=admissionPayload(c,row.digest,row.signature,row.accepted_at);
+    const receiptSignature=await sign(payload);
+    // Signers may mutate their input buffer; verify freshly reconstructed bytes.
+    signature(admissionPayload(c,row.digest,row.signature,row.accepted_at),receiptSignature,c.validator);
+    return this.db.transaction(()=>{
+      this.ensureOpen();this.committedPractice();
+      const current=this.db.query('SELECT challenge,digest,signature,accepted_at FROM challenges WHERE scope=? AND miner=? AND artifact IS NOT NULL').get(this.scopeId(),c.miner);
+      if(JSON.stringify(current)!==JSON.stringify(row))throw new Error('Admission changed while signing');
+      const proof:AdmissionProof={challengeSignature:value.signature,acceptedAt:row.accepted_at,receiptSignature};
+      this.db.query('INSERT OR IGNORE INTO admission_proofs(scope,miner,proof) VALUES(?,?,?)').run(this.scopeId(),c.miner,JSON.stringify(proof));
+      return JSON.parse((this.db.query('SELECT proof FROM admission_proofs WHERE scope=? AND miner=?').get(this.scopeId(),c.miner) as {proof:string}).proof) as AdmissionProof;
+    }).immediate();
+  }
   closePractice(seed:string,pairs:number,salt:string){
     const revealed=practiceContract(seed,salt,pairs);
     const fixtureSha256=sha256(Buffer.from(JSON.stringify(corpus(seed,pairs))));
@@ -190,10 +227,15 @@ export class ContributionInbox{
         return {cohortSha256:stored.digest,participants:frozen.contributions.length,closedAt:frozen.closedAt};
       }
       const rows=this.db.query('SELECT miner,challenge,artifact,digest,signature FROM challenges WHERE scope=? AND artifact IS NOT NULL ORDER BY miner').all(this.scopeId()) as {miner:string;challenge:string;artifact:string;digest:string;signature:string}[];
-      const contributions=rows.filter(row=>this.miners.has(row.miner)).map(row=>({miner:row.miner,challenge:JSON.parse(row.challenge),artifactSha256:row.digest,signature:row.signature,submission:artifact(Buffer.from(row.artifact))}));
+      const contributions=rows.filter(row=>this.miners.has(row.miner)).map(row=>{
+        const proof=this.db.query('SELECT proof FROM admission_proofs WHERE scope=? AND miner=?').get(this.scopeId(),row.miner) as {proof:string}|null;
+        if(!proof)throw new Error('Admission receipt required before closure');
+        return {miner:row.miner,challenge:JSON.parse(row.challenge),artifactSha256:row.digest,signature:row.signature,submission:artifact(Buffer.from(row.artifact)),admission:JSON.parse(proof.proof) as AdmissionProof};
+      });
       if(contributions.length<1 || contributions.length>100)throw new Error('Frozen practice requires 1–100 admitted miners');
       const closedAt=this.clock();if(!Number.isSafeInteger(closedAt) || closedAt<0)throw new Error('Invalid closure time');
-      const frozen:FrozenPractice={schema:'sentinel-frozen-practice/v1',scope:{...this.policy},seed,pairs,salt,contract:revealed,generator:'sentinel-corpus/v1',fixtureSha256,
+      if(contributions.some(c=>c.admission.acceptedAt>closedAt))throw new Error('Closure precedes admission');
+      const frozen:FrozenPractice={schema:'sentinel-frozen-practice/v2',scope:{...this.policy},seed,pairs,salt,contract:revealed,generator:'sentinel-corpus/v1',fixtureSha256,
         baseline:executionIdentity(reference),scorer:'sentinel-pareto/v1',eligible:[...this.miners].sort(),closedAt,contributions};
       const body=JSON.stringify(frozen),digest=sha256(Buffer.from(body));
       if(Buffer.byteLength(body)>snapshotByteLimit)throw new Error('Snapshot byte limit');
@@ -209,7 +251,7 @@ export class ContributionInbox{
     this.committedPractice();
     if(practiceRound(frozen.contract)!==this.policy.round || practiceRound(practiceContract(frozen.seed,frozen.salt,frozen.pairs))!==this.policy.round)throw new Error('Frozen practice commitment mismatch');
     if(JSON.stringify(frozen.eligible)!==JSON.stringify([...this.miners].sort()))throw new Error('Frozen practice eligibility conflict');
-    if(frozen.schema!=='sentinel-frozen-practice/v1' || JSON.stringify(frozen.scope)!==JSON.stringify(this.policy) ||
+    if(frozen.schema!=='sentinel-frozen-practice/v2' || JSON.stringify(frozen.scope)!==JSON.stringify(this.policy) ||
       frozen.generator!=='sentinel-corpus/v1' || frozen.scorer!=='sentinel-pareto/v1' || frozen.baseline!==executionIdentity(reference) ||
       frozen.fixtureSha256!==sha256(Buffer.from(JSON.stringify(corpus(frozen.seed,frozen.pairs)))))throw new Error('Frozen practice implementation mismatch');
     return frozen;

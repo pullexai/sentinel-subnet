@@ -4,7 +4,7 @@ import {cryptoWaitReady,encodeAddress,sr25519PairFromSeed,sr25519Sign} from '@po
 import {randomBytes} from 'node:crypto';
 import {mkdtemp,rm,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {ContributionInbox,contributionPayload,sha256,practiceContract,practiceRound,evaluateSnapshot,snapshotByteLimit,type Scope} from '../src/protocol';
+import {ContributionInbox,challengePayload,contributionPayload,sha256,practiceContract,practiceRound,evaluateSnapshot,snapshotByteLimit,type Scope} from '../src/protocol';
 import {reference} from '../src/competition';
 import {scoreTarget,scoreAttestationPayload,quorumPolicyDigest,verifyScoreQuorum} from '../src/attestations';
 
@@ -39,6 +39,23 @@ test('cohort closure freezes contract, signatures and eligibility across concurr
       inspector.query('INSERT INTO practice_contracts(scope,body) VALUES(?,?)').run(JSON.stringify([scope.genesis,scope.netuid,scope.round,scope.validator]),rows[0].body);
     }finally{inspector.close();}
     await inbox.accept(first,bytes);
+    expect(()=>inbox.closePractice('d'.repeat(64),1,salt)).toThrow('receipt required');
+    const signed={challenge:first.challenge,signature:Buffer.from(sr25519Sign(challengePayload(first.challenge),keys[2])).toString('hex')};
+    await expect(inbox.attestAdmission({...signed,signature:'0'.repeat(128)},async()=>{throw new Error('must not sign');})).rejects.toThrow('signature');
+    await expect(inbox.attestAdmission(signed,async()=>{throw new Error('signer unavailable');})).rejects.toThrow('signer unavailable');
+    await expect(inbox.attestAdmission(signed,async payload=>Buffer.from(sr25519Sign(payload,keys[1])).toString('hex'))).rejects.toThrow('signature');
+    const admissionDb=new Database(join(directory,'inbox.sqlite'));
+    try{
+      await expect(inbox.attestAdmission(signed,async payload=>{
+        admissionDb.query('UPDATE challenges SET accepted_at=accepted_at+1 WHERE miner=?').run(addresses[0]);
+        return Buffer.from(sr25519Sign(payload,keys[2])).toString('hex');
+      })).rejects.toThrow('Admission changed');
+      expect(admissionDb.query('SELECT * FROM admission_proofs').all()).toHaveLength(0);
+      admissionDb.query('UPDATE challenges SET accepted_at=accepted_at-1 WHERE miner=?').run(addresses[0]);
+    }finally{admissionDb.close();}
+    const proof=await inbox.attestAdmission(signed,async payload=>Buffer.from(sr25519Sign(payload,keys[2])).toString('hex'));
+    expect(proof.acceptedAt).toBe(100);
+    expect(await peer.attestAdmission(signed,async()=>{throw new Error('replay must not sign');})).toEqual(proof);
     expect(()=>inbox.closePractice('e'.repeat(64),1,salt)).toThrow('reveal conflict');
     expect(()=>inbox.closePractice('d'.repeat(64),1,'e'.repeat(64))).toThrow('reveal conflict');
     // accept yields for crypto readiness; closure commits before its admission transaction.
@@ -83,7 +100,13 @@ test('cohort closure freezes contract, signatures and eligibility across concurr
     await mutate(v=>v.fixtureSha256='0'.repeat(64));
     await mutate(v=>v.salt='a'.repeat(64));
     await mutate(v=>v.closedAt=0);
-    const duplicate=Buffer.from(exported.toString().replace('{','{"schema":"sentinel-frozen-practice/v1",'));
+    await mutate(v=>delete v.contributions[0].admission);
+    await mutate(v=>v.contributions[0].admission.acceptedAt=v.contributions[0].challenge.expiresAt);
+    await mutate(v=>v.contributions[0].admission.acceptedAt=99);
+    await mutate(v=>v.contributions[0].admission.receiptSignature='0'.repeat(128));
+    await mutate(v=>v.contributions[0].admission.challengeSignature='0'.repeat(128));
+    await mutate(v=>v.schema='sentinel-frozen-practice/v1');
+    const duplicate=Buffer.from(exported.toString().replace('{','{"schema":"sentinel-frozen-practice/v2",'));
     await expect(evaluateSnapshot(duplicate,{...expected,cohortSha256:sha256(duplicate)})).rejects.toThrow('noncanonical');
     const snapshotPath=join(directory,'snapshot.json'),expectedPath=join(directory,'expected.json');
     await writeFile(snapshotPath,exported,{mode:0o600});await writeFile(expectedPath,JSON.stringify(expected),{mode:0o600});

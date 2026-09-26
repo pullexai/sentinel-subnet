@@ -31,6 +31,8 @@ Reports include TP/FP/FN, clean-case false positives, precision/recall, per-fami
 
 ## Required before network readiness
 
+[ADMISSION.md](ADMISSION.md) adds coordinator-signed admission receipts and retained challenge signatures to snapshot v2. Closure requires these proofs; replay verifies declared admission bounds. This authenticates coordinator clock statements, not independent time or delivery.
+
 Closed cohorts can be exported and recalculated without the coordinator database using `bun run validator:replay <snapshot.json> <trusted-expectations.json>`. [REPLAY.md](REPLAY.md) specifies bounded validation, separate expected-digest/scope authority and actual separate-process reproducibility evidence.
 
 Signed score agreement is available in `src/attestations.ts`: deterministic report targets, domain-separated sr25519 attestations and strict verification against an operator-selected key set/threshold. `src/vote-journal.ts` durably retains observed votes/conflict proofs and excludes equivocators without lowering that threshold, including after restart. Duplicate, conflicting and untrusted signatures fail certificate verification. [ATTESTATIONS.md](ATTESTATIONS.md) specifies bytes, use and limits; key agreement alone is not independent-validator consensus or network finality.
