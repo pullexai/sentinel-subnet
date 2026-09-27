@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {ContributionInbox,challengePayload,contributionPayload,sha256,verifyChallenge,practiceContract,practiceRound,type Scope} from '../src/protocol';
 import {reference} from '../src/competition';
 
-test('sr25519 challenge binding, durable replay fence and authenticated practice evaluation',async()=>{
+test('sr25519 challenge binding, durable idempotent acceptance and authenticated practice evaluation',async()=>{
   await cryptoWaitReady();
   const validator=sr25519PairFromSeed(randomBytes(32)),miner=sr25519PairFromSeed(randomBytes(32)),other=sr25519PairFromSeed(randomBytes(32));
   const address=encodeAddress(miner.publicKey,42),otherAddress=encodeAddress(other.publicKey,42);
@@ -35,16 +35,27 @@ test('sr25519 challenge binding, durable replay fence and authenticated practice
     const malformed=Buffer.from('{"schema":"sentinel-literal-miner/v1","schema":"sentinel-literal-miner/v1","rules":[{"id":"aa","literal":"x"}]}');
     await expect(inbox.accept({...envelope,artifactSha256:sha256(malformed),signature:Buffer.from(sr25519Sign(contributionPayload(c,sha256(malformed)),miner)).toString('hex')},malformed)).rejects.toThrow('Noncanonical');
     const peer=new ContributionInbox(directory,scope,[address],100,()=>now);
-    try{const results=await Promise.allSettled([inbox.accept(envelope,bytes),peer.accept(envelope,bytes)]);expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(1);}finally{peer.close();}
+    const expectedReceipt={hotkey:address,artifactSha256:digest};
+    try{expect(await Promise.all([inbox.accept(envelope,bytes),peer.accept(envelope,bytes)])).toEqual([expectedReceipt,expectedReceipt]);}finally{peer.close();}
     inbox.close();inbox=new ContributionInbox(directory,scope,[address,otherAddress],100,()=>now);
-    await expect(inbox.accept(envelope,bytes)).rejects.toThrow('replay');
+    expect(await inbox.accept(envelope,bytes)).toEqual(expectedReceipt);
+    const different=Buffer.from(JSON.stringify({schema:'sentinel-literal-miner/v1',rules:[{id:'changed',literal:'other'}]}));
+    const conflicting={...envelope,artifactSha256:sha256(different),signature:Buffer.from(sr25519Sign(contributionPayload(c,sha256(different)),miner)).toString('hex')};
+    await expect(inbox.accept(conflicting,different)).rejects.toThrow('nonce conflict');
     expect(inbox.candidates()).toEqual([{participant:address,submission:reference}]);
     const expired=inbox.issue(otherAddress);now=expired.expiresAt;
-    await expect(inbox.accept({...envelope,challenge:expired,signature:Buffer.from(sr25519Sign(contributionPayload(expired,digest),other)).toString('hex')},bytes)).rejects.toThrow('expired');
+    await expect(inbox.accept({...envelope,challenge:expired,signature:Buffer.from(sr25519Sign(contributionPayload(expired,digest),other)).toString('hex')},bytes)).rejects.toThrow('Expired');
+    expect(await inbox.accept(envelope,bytes)).toEqual(expectedReceipt);
     const revoked=new ContributionInbox(directory,scope,[otherAddress],100,()=>now);
     try{expect(revoked.candidates()).toEqual([]);await expect(revoked.accept(envelope,bytes)).rejects.toThrow('Ineligible');}finally{revoked.close();}
     await inbox.attestAdmission(signed,async payload=>Buffer.from(sr25519Sign(payload,validator)).toString('hex'));
     inbox.closePractice('d'.repeat(64),1,'e'.repeat(64));
+    const frozen=inbox.exportPractice();
+    expect(await inbox.accept(envelope,bytes)).toEqual(expectedReceipt);
+    expect(await inbox.accept({...envelope,signature:Buffer.from(sr25519Sign(contributionPayload(c,digest),miner)).toString('hex')},bytes)).toEqual(expectedReceipt);
+    expect(inbox.exportPractice()).toEqual(frozen);
+    await expect(inbox.accept(conflicting,different)).rejects.toThrow('nonce conflict');
+    expect(inbox.candidates()).toHaveLength(1);
     const report=await inbox.evaluatePractice();
     expect(report.authentication.scope).toEqual(scope);
     expect(report.results[0].participants).toEqual([address]);expect(report.results[0].comparison.candidate).toMatchObject({tp:4,fp:0});

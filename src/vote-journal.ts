@@ -1,7 +1,8 @@
 import {Database} from 'bun:sqlite';
 import {lstatSync,mkdirSync} from 'node:fs';
 import {join} from 'node:path';
-import {quorumPolicyDigest,verifyScoreAttestation,verifyScoreQuorum,type QuorumPolicy,type ScoreAttestation,type ScoreTarget} from './attestations';
+import {quorumPolicyDigest,scoreTarget,scoreAttestationPayload,verifyScoreAttestation,verifyScoreQuorum,type QuorumPolicy,type ScoreAttestation,type ScoreTarget} from './attestations';
+import {evaluateSnapshot,type SnapshotExpectation} from './protocol';
 
 export class VoteJournal{
   private db:Database;
@@ -17,10 +18,45 @@ export class VoteJournal{
     this.db=new Database(path,{create:true,strict:true});
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS votes(id INTEGER PRIMARY KEY,scope TEXT NOT NULL,validator TEXT NOT NULL,target TEXT NOT NULL,body TEXT NOT NULL,
-        UNIQUE(scope,validator,target));`);
+        UNIQUE(scope,validator,target));
+      CREATE TABLE IF NOT EXISTS signing_locks(scope TEXT NOT NULL,validator TEXT NOT NULL,target TEXT NOT NULL,vote TEXT,
+        PRIMARY KEY(scope,validator));
+      CREATE TRIGGER IF NOT EXISTS signing_lock_no_delete BEFORE DELETE ON signing_locks BEGIN SELECT RAISE(ABORT,'Signing locks are permanent'); END;
+      CREATE TRIGGER IF NOT EXISTS signing_lock_no_rebind BEFORE UPDATE ON signing_locks
+        WHEN NEW.scope<>OLD.scope OR NEW.validator<>OLD.validator OR NEW.target<>OLD.target OR OLD.vote IS NOT NULL
+        BEGIN SELECT RAISE(ABORT,'Signing locks are immutable'); END;
+      CREATE TRIGGER IF NOT EXISTS signing_lock_no_replace BEFORE INSERT ON signing_locks
+        WHEN EXISTS(SELECT 1 FROM signing_locks WHERE scope=NEW.scope AND validator=NEW.validator)
+        BEGIN SELECT RAISE(ABORT,'Signing locks cannot be replaced'); END;`);
   }
   private scope(target:ScoreTarget){return JSON.stringify([target.genesis,target.netuid,target.round,this.policySha256]);}
   private target(target:ScoreTarget){return JSON.stringify([target.cohortSha256,target.resultSha256]);}
+  async evaluateAndSign(bytes:Uint8Array,expected:SnapshotExpectation,validator:string,sign:(payload:Uint8Array)=>Promise<string>){
+    if(!this.policy.validators.includes(validator))throw new Error('Untrusted signing validator');
+    // Recompute from separately trusted frozen inputs; received scores are never signing inputs.
+    const report=await evaluateSnapshot(bytes,expected),target=scoreTarget(report),scope=this.scope(target),identity=this.target(target);
+    const stored=this.db.transaction(()=>{
+      const prior=this.db.query('SELECT target,vote FROM signing_locks WHERE scope=? AND validator=?').get(scope,validator) as {target:string;vote:string|null}|null;
+      if(prior && prior.target!==identity)throw new Error('Conflicting signing target');
+      if(!prior)this.db.query('INSERT INTO signing_locks(scope,validator,target) VALUES(?,?,?)').run(scope,validator,identity);
+      return prior?.vote;
+    }).immediate();
+    // The FULL-synchronized lock survives a crash or lost response from the signer.
+    // Retrying the same target is allowed; no recovery path chooses a different one.
+    const candidate=stored?JSON.parse(stored):{schema:'sentinel-score-attestation/v1',target,policySha256:this.policySha256,validator,
+      signature:await sign(scoreAttestationPayload(target,this.policySha256,validator))};
+    const verified=await verifyScoreAttestation(candidate,this.policy);
+    if(verified.validator!==validator || this.scope(verified.target)!==scope || this.target(verified.target)!==identity)throw new Error('Stored signing vote mismatch');
+    const vote=this.db.transaction(()=>{
+      const row=this.db.query('SELECT target,vote FROM signing_locks WHERE scope=? AND validator=?').get(scope,validator) as {target:string;vote:string|null}|null;
+      if(!row || row.target!==identity)throw new Error('Signing lock changed');
+      if(row.vote)return JSON.parse(row.vote) as ScoreAttestation;
+      this.db.query('UPDATE signing_locks SET vote=? WHERE scope=? AND validator=?').run(JSON.stringify(verified),scope,validator);
+      return verified;
+    }).immediate();
+    await this.observe(vote);
+    return {target,vote,report};
+  }
   async observe(value:unknown){
     const vote=await verifyScoreAttestation(value,this.policy),scope=this.scope(vote.target),target=this.target(vote.target);
     return this.db.transaction(()=>{

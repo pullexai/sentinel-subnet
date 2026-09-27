@@ -42,6 +42,20 @@ Returned `sentinel-score-quorum/v1` contains target, policy digest, threshold, s
 
 ## Evidence and remaining work
 
+### Recompute and sign with a persistent conflict lock
+
+`VoteJournal.evaluateAndSign(snapshotBytes, trustedExpectations, validatorAddress, signer)` evaluates the frozen cohort through `evaluateSnapshot` before constructing the signing target. It commits an immutable `(network, round, policy, validator)` lock with SQLite FULL synchronization **before** calling the signer. A failed/lost signer response leaves the lock intact. A conflicting cohort/result is refused after restart; the identical target may retry. The first verified signed vote is retained, returned on replay and added to the observation journal. Separate concurrent connections cannot sign two distinct targets through this path. Deleting the database or changing policy identity is not a supported recovery procedure.
+
+Local practice command:
+
+```sh
+bun run validator:attest SNAPSHOT.json EXPECTATIONS.json POLICY.json VALIDATOR_ADDRESS PRIVATE_SEED JOURNAL_DIRECTORY
+```
+
+`POLICY.json` is compact JSON `{ "validators": [...], "threshold": ... }` without spaces in the actual file; policy/expectations are independently trusted inputs, not copied blindly from a peer. `PRIVATE_SEED` contains exactly 32 raw bytes in a regular, non-symlink, single-link mode-0600 file. It must be an independently created disposable **practice key**, never a funded wallet, coldkey or product release key. The key is loaded only after successful evaluation and durable lock creation, cleared afterward, and not needed to recover an already stored vote. Stdout contains `{target,vote,report}`; no key material. Retain the private directory and WAL together. Signed score output remains public-template practice only.
+
+The actual two-process fixture recomputes the same closed synthetic cohort in two Bun processes with separate SQLite journals and practice keys, verifies identical targets and verifies the original explicit threshold. It also exercises signer response loss, restart, conflicting snapshots, concurrent conflict, immutable locks, key-file permission rejection and keyless signature recovery. This is independent local execution, not independent operators, hidden evaluation, EC-08 transcript-set agreement, hardware key custody or network readiness. Network deployment still requires an isolated authorized signer and the full committed-window protocol.
+
 ### Durable observed-vote journal
 
 `src/vote-journal.ts` adds `VoteJournal(privateDirectory, policy)` using Bun SQLite/WAL with FULL synchronization. It requires a private real directory and rejects symlink/nonregular/hardlinked database files; the directory's parents and storage remain trusted. Existing inbox storage is untouched; votes use `votes.sqlite`. Keep DB and WAL together under your recovery policy.

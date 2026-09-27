@@ -230,13 +230,18 @@ export class ContributionInbox{
     const submission=artifact(bytes),payload=contributionPayload(c,digest);
     signature(payload,value.signature,c.miner);
     return this.db.transaction(()=>{
-      this.ensureOpen();
+      this.ensureChain();
       this.committedPractice();
-      const row=this.db.query('SELECT challenge,artifact FROM challenges WHERE scope=? AND miner=? AND nonce=?').get(this.scopeId(),c.miner,c.nonce) as {challenge:string;artifact:string|null}|null;
+      const row=this.db.query('SELECT challenge,artifact,digest FROM challenges WHERE scope=? AND miner=? AND nonce=?').get(this.scopeId(),c.miner,c.nonce) as {challenge:string;artifact:string|null;digest:string|null}|null;
+      if(!row || !challengePayload(JSON.parse(row.challenge)).equals(challengePayload(c)))throw new Error('Unknown challenge');
+      if(row.artifact!==null){
+        if(row.digest!==digest || row.artifact!==JSON.stringify(submission))throw new Error('Contribution nonce conflict');
+        return {hotkey:c.miner,artifactSha256:digest};
+      }
+      if(this.db.query('SELECT 1 FROM frozen_practice WHERE scope=?').get(this.scopeId()))throw new Error('Practice cohort closed');
       const now=this.clock();
       if(this.chain)chainFresh(this.chain.approval,now);
-      if(!Number.isSafeInteger(now) || !row || !challengePayload(JSON.parse(row.challenge)).equals(challengePayload(c)) || now<c.issuedAt || now>=c.expiresAt)throw new Error('Unknown or expired challenge');
-      if(row.artifact!==null)throw new Error('Contribution replay');
+      if(!Number.isSafeInteger(now) || now<c.issuedAt || now>=c.expiresAt)throw new Error('Expired challenge');
       this.db.query('UPDATE challenges SET artifact=?,digest=?,signature=?,accepted_at=? WHERE scope=? AND miner=?').run(JSON.stringify(submission),digest,value.signature as string,now,this.scopeId(),c.miner);
       return {hotkey:c.miner,artifactSha256:digest};
     }).immediate();

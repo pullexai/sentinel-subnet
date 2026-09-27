@@ -2,10 +2,10 @@ import {open,constants} from 'node:fs/promises';
 import {evaluateSnapshot,snapshotByteLimit} from './protocol';
 import {scoreTarget} from './attestations';
 
-async function boundedFile(path:string,limit:number){
+export async function boundedFile(path:string,limit:number,privateFile=false){
   const file=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
   try{
-    const info=await file.stat();if(!info.isFile() || info.size>limit)throw new Error('Invalid replay file');
+    const info=await file.stat();if(!info.isFile() || info.size>limit || privateFile && (info.mode & 0o077 || info.nlink!==1))throw new Error('Invalid replay file');
     const bytes=Buffer.alloc(limit+1);let length=0;
     while(length<bytes.length){const {bytesRead}=await file.read(bytes,length,bytes.length-length);if(!bytesRead)break;length+=bytesRead;}
     if(length>limit)throw new Error('Replay file byte limit');return bytes.subarray(0,length);

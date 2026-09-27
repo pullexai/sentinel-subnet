@@ -40,7 +40,8 @@ test('operator-approved chain identity binds freshness, registrations and durabl
     expect(()=>legacy.registerPractice(contract)).toThrow('binding');legacy.close();
     inbox.registerPractice(contract);const challenge=inbox.issue(key);expect(challenge.miner).toBe(key);
     const artifact=Buffer.from(JSON.stringify(reference)),artifactSha256=sha256(artifact);
-    await inbox.accept({schema:'sentinel-contribution/v1',challenge,artifactSha256,signature:sign(contributionPayload(challenge,artifactSha256))},artifact);
+    const acceptedContribution={schema:'sentinel-contribution/v1',challenge,artifactSha256,signature:sign(contributionPayload(challenge,artifactSha256))};
+    await inbox.accept(acceptedContribution,artifact);
     await inbox.attestAdmission({challenge,signature:sign(challengePayload(challenge))},async bytes=>sign(bytes));
     inbox.closePractice('1'.repeat(64),1,'2'.repeat(64));
     const snapshot=inbox.exportPractice(),expected={cohortSha256:sha256(snapshot),scope,eligible:[key],chain:{policy,approval:input.approval}};
@@ -59,9 +60,12 @@ test('operator-approved chain identity binds freshness, registrations and durabl
     inbox.close();
     expect(()=>new ContributionInbox(dir,scope,[key],50,()=>now)).toThrow('binding');
     const restarted=ContributionInbox.chainQualified(dir,input,50,()=>now);
+    expect(await restarted.accept(acceptedContribution,artifact)).toEqual({hotkey:key,artifactSha256});
     now=1100;expect(()=>restarted.issue(key)).toThrow('expired');
+    await expect(restarted.accept(acceptedContribution,artifact)).rejects.toThrow('expired');
     expect(restarted.exportPractice()).toEqual(snapshot);
     expect(restarted.revokeChainApproval()).toEqual({revokedAt:1100});
+    await expect(restarted.accept(acceptedContribution,artifact)).rejects.toThrow('revoked');
     expect(()=>restarted.closePractice('1'.repeat(64),1,'2'.repeat(64))).toThrow('revoked');
     expect(restarted.exportPractice()).toEqual(snapshot);restarted.close();
     const historical=ContributionInbox.chainQualified(dir,input,50,()=>now);
