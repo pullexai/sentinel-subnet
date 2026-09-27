@@ -6,10 +6,12 @@ export function parseInput(value: unknown): Input {
   const input = value as Input;
   if (Object.keys(input).sort().join(',')!=='changedFiles,files,id,schema' || input.schema!=='sentinel-practice-input/v1' ||
     typeof input.id!=='string' || !/^[a-f0-9]{64}$/.test(input.id) || !input.files || typeof input.files!=='object' || Array.isArray(input.files) ||
-    Object.keys(input.files).length>100 || !Array.isArray(input.changedFiles) || input.changedFiles.some(p => typeof p!=='string' || !Object.hasOwn(input.files,p))) throw new Error('Invalid miner input schema');
+    Object.keys(input.files).length<1 || Object.keys(input.files).length>100 || !Array.isArray(input.changedFiles) ||
+    input.changedFiles.length>100 || new Set(input.changedFiles).size!==input.changedFiles.length ||
+    input.changedFiles.some(p => typeof p!=='string' || !Object.hasOwn(input.files,p))) throw new Error('Invalid miner input schema');
   let bytes=0;
   for (const [path,text] of Object.entries(input.files)) {
-    if (!/^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*\.[a-zA-Z0-9]+$/.test(path) || typeof text!=='string') throw new Error('Invalid practice file');
+    if (!/^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*\.[a-zA-Z0-9]+$/.test(path) || typeof text!=='string' || !text.isWellFormed()) throw new Error('Invalid practice file');
     bytes+=Buffer.byteLength(text);
   }
   if (bytes>1_000_000) throw new Error('Practice source limit exceeded');
