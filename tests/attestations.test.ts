@@ -33,3 +33,32 @@ test('explicit score quorum binds unique validators, contract, cohort, result an
   mutable[0].signature='0'.repeat(128);mutablePolicy.threshold=3;mutableTarget.round='f'.repeat(64);
   expect(await pending).toEqual(result);
 });
+
+test('fault-bounded policy requires availability and honest intersection without rewriting practice v1',async()=>{
+  await cryptoWaitReady();
+  const keys=Array.from({length:7},()=>sr25519PairFromSeed(randomBytes(32))),validators=keys.map(k=>encodeAddress(k.publicKey,42));
+  const target:ScoreTarget={genesis:'a'.repeat(64),netuid:9,round:'b'.repeat(64),cohortSha256:'c'.repeat(64),resultSha256:'d'.repeat(64)};
+  // Exhaust all small N/f/q combinations against independent set intersection:
+  // the smallest possible overlap is 2q-N, which must exceed the faulty set.
+  for(let n=1;n<=7;n++)for(let f=0;f<n;f++)for(let q=1;q<=n;q++){
+    const policy={schema:'sentinel-quorum-policy/v2' as const,validators:validators.slice(0,n),threshold:q,maxFaultyValidators:f};
+    const safe=q<=n-f && Math.max(0,2*q-n)>f;
+    if(safe)expect(quorumPolicyDigest(policy)).toMatch(/^[a-f0-9]{64}$/);
+    else expect(()=>quorumPolicyDigest(policy)).toThrow('honest intersection');
+  }
+  const policy={schema:'sentinel-quorum-policy/v2' as const,validators:validators.slice(0,4),threshold:3,maxFaultyValidators:1};
+  const digest=quorumPolicyDigest(policy);
+  expect(digest).not.toBe(quorumPolicyDigest({validators:policy.validators,threshold:3}));
+  expect(quorumPolicyDigest({...policy,validators:[...policy.validators].reverse()})).toBe(digest);
+  const votes=keys.slice(0,3).map((key,i)=>({schema:'sentinel-score-attestation/v1',target,policySha256:digest,validator:validators[i],
+    signature:Buffer.from(sr25519Sign(scoreAttestationPayload(target,digest,validators[i]),key)).toString('hex')}));
+  const receipt=await verifyScoreQuorum(votes,target,policy);
+  expect(receipt).toMatchObject({schema:'sentinel-score-quorum/v2',maxFaultyValidators:1,threshold:3,weights:null,rewards:null});
+  await expect(verifyScoreQuorum(votes.slice(0,2),target,policy)).rejects.toThrow('Insufficient');
+  await expect(verifyScoreQuorum(votes,target,{validators:policy.validators,threshold:3})).rejects.toThrow('Untrusted');
+  await expect(verifyScoreQuorum(votes,target,{...policy,maxFaultyValidators:0})).rejects.toThrow('Untrusted');
+  for(const invalid of [{...policy,maxFaultyValidators:-1},{...policy,maxFaultyValidators:1.5},{...policy,maxFaultyValidators:4},
+    {...policy,schema:'unknown'},{...policy,extra:true},{validators,threshold:5,maxFaultyValidators:1}])expect(()=>quorumPolicyDigest(invalid)).toThrow();
+  const mutable=structuredClone(policy),pending=verifyScoreQuorum(votes,target,mutable);mutable.maxFaultyValidators=0;
+  expect(await pending).toEqual(receipt);
+});

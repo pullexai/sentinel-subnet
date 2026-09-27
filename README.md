@@ -41,6 +41,8 @@ Closed cohorts can be exported and recalculated without the coordinator database
 
 Signed score agreement is available in `src/attestations.ts`: deterministic report targets, domain-separated sr25519 attestations and strict verification against an operator-selected key set/threshold. `src/vote-journal.ts` durably retains observed votes/conflict proofs and excludes equivocators without lowering that threshold, including after restart. Duplicate, conflicting and untrusted signatures fail certificate verification. [ATTESTATIONS.md](ATTESTATIONS.md) specifies bytes, use and limits; key agreement alone is not independent-validator consensus or network finality.
 
+An explicitly selected `sentinel-quorum-policy/v2` additionally pins a maximum faulty-validator assumption and checks both honest-intersection and quorum-availability inequalities. Its digest and certificate version differ from v1 practice policies; invalid fault bounds cannot fall back to practice verification. This is structural policy validation, not independent-operator or network qualification.
+
 `bun run validator:attest` now recomputes a trusted frozen practice snapshot before signing, records a durable one-target-per-round signing lock, and recovers the same signature after restart. Two separate local processes/journals produce matching score targets in the integrated fixture. The CLI accepts only a private disposable practice seed; funded wallets and production signing custody are outside this command's qualification. See [ATTESTATIONS.md](ATTESTATIONS.md) for exact arguments and remaining hidden-evaluation/independence requirements.
 
 ### Authenticated contribution increment

@@ -72,6 +72,21 @@ test('independent local validator processes recompute, persist signing locks and
       for(const result of results)await observer.observe(result.vote);
       expect((await observer.certify(results[0].target)).certificate.signers).toEqual([...validators].sort());
     }finally{observer.close();}
+    const faultPolicy={schema:'sentinel-quorum-policy/v2' as const,validators,threshold:2,maxFaultyValidators:0};
+    await writeFile(join(directory,'policy'),JSON.stringify(faultPolicy));
+    const bounded=await Promise.all([cli(0,'v2-validator-0'),cli(1,'v2-validator-1')]);
+    const boundedResults=bounded.map(result=>{expect(result.exit).toBe(0);expect(result.err).toBe('');return JSON.parse(result.out);});
+    expect(boundedResults[0].target).toEqual(results[0].target);
+    expect(boundedResults[0].vote.policySha256).not.toBe(results[0].vote.policySha256);
+    const boundedObserver=new VoteJournal(join(directory,'v2-observer'),faultPolicy);
+    try{
+      await expect(boundedObserver.observe(results[0].vote)).rejects.toThrow('Untrusted');
+      for(const result of boundedResults)await boundedObserver.observe(result.vote);
+      expect((await boundedObserver.certify(results[0].target)).certificate).toMatchObject({schema:'sentinel-score-quorum/v2',maxFaultyValidators:0,threshold:2});
+    }finally{boundedObserver.close();}
+    await writeFile(join(directory,'policy'),JSON.stringify({...faultPolicy,maxFaultyValidators:1}));
+    const invalidPolicy=await cli(0,'v2-invalid');expect(invalidPolicy.exit).toBe(1);expect(invalidPolicy.out).toBe('');expect(invalidPolicy.err).toContain('honest intersection');
+    await writeFile(join(directory,'policy'),JSON.stringify(policy));
     expect(JSON.parse((await cli(0)).out).vote).toEqual(results[0].vote);
     for(const seed of seeds)expect(processes.some(p=>p.out.includes(seed.toString('hex')) || p.err.includes(seed.toString('hex')))).toBe(false);
     await chmod(join(directory,'key-0'),0o644);const refused=await cli(0,'unsafe-seed');expect(refused.exit).toBe(1);expect(refused.out).toBe('');

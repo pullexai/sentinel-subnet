@@ -30,6 +30,16 @@ Result hash input: UTF-8 `sentinel/deterministic-practice-score/v1\n` followed b
 
 Policy is exactly `{validators,threshold}`: 1–100 unique canonical SS58-42 addresses, integer threshold between 1 and their count. No threshold is selected by the library; a threshold of one is valid input, not an independence claim. Policy hash input is `sentinel/quorum-policy/v1\n` plus compact JSON `[sortedValidators,threshold]`.
 
+### Explicit fault-bounded policy v2
+
+New deployments can explicitly supply `{schema:"sentinel-quorum-policy/v2", validators, threshold, maxFaultyValidators}`. No fault tolerance is inferred from the old practice policy. For `N` distinct validators, assumed faulty count `f`, threshold `q`, validation requires `0 <= f < N`, `q <= N-f` and `2q > N+f`. A valid pair of certificates must therefore overlap in more than `f` validators, assuming honest keys never sign conflicting targets. The available honest set can also meet the unchanged threshold. There are no chosen production counts or default Byzantine assumptions.
+
+The v2 policy digest uses `sentinel/quorum-policy/v2\n` plus compact JSON `[sortedValidators,q,f]`. Changing the fault assumption invalidates earlier signatures even when the validator list and threshold match. Attestation envelope and signing domain stay v1 because they already bind this full policy digest. Verified receipts use `sentinel-score-quorum/v2`, additionally retaining `maxFaultyValidators`; v1 practice bytes and receipts remain unchanged. The existing replay CLI, signer and persistent journal accept either explicitly selected policy. Failed v2 validation never downgrades to v1.
+
+These arithmetic conditions prove neither operator independence nor the actual number of dishonest keys. They do not supply complete transcript commitments, authenticated transport, hidden evaluations, chain finality or production membership governance. Policy rotation remains a separate authorization; changing policies within a round is not recovery.
+
+Executed v2 evidence: `bun run check`, 14 passing tests, 566 assertions. Fixtures cover every `N/f/q` combination through seven validators, strict fields/bounds, version/fault-assumption signature isolation, mutation-safe verification, and two actual local CLI processes with separate journals. Invalid v2 policy refuses before evaluation/signing. The two-process example assumes zero faulty validators explicitly; it is not Byzantine or operator-independence qualification.
+
 Signature payload is UTF-8 `sentinel/score-attestation/sr25519/v1\n` followed by compact JSON:
 
 ```text

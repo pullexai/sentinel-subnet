@@ -2,7 +2,7 @@ import { cryptoWaitReady,decodeAddress,encodeAddress,sr25519Verify } from '@polk
 import { sha256,type ContributionInbox } from './protocol';
 
 export type ScoreTarget={genesis:string;netuid:number;round:string;cohortSha256:string;resultSha256:string};
-export type QuorumPolicy={validators:string[];threshold:number};
+export type QuorumPolicy={validators:string[];threshold:number} | {schema:'sentinel-quorum-policy/v2';validators:string[];threshold:number;maxFaultyValidators:number};
 export type ScoreAttestation={schema:'sentinel-score-attestation/v1';target:ScoreTarget;policySha256:string;validator:string;signature:string};
 const exact=(v:unknown,keys:string[]):v is Record<string,unknown>=>!!v && typeof v==='object' && !Array.isArray(v) && Object.keys(v).length===keys.length && keys.every(k=>Object.hasOwn(v,k));
 const hex=(v:unknown):v is string=>typeof v==='string' && /^[a-f0-9]{64}$/.test(v);
@@ -15,9 +15,15 @@ function targetFields(v:unknown){
   return [v.genesis,v.netuid,v.round,v.cohortSha256,v.resultSha256];
 }
 export function quorumPolicyDigest(value:unknown){
-  if(!exact(value,['validators','threshold']) || !Array.isArray(value.validators) || value.validators.length<1 || value.validators.length>100 ||
+  if((!exact(value,['schema','validators','threshold','maxFaultyValidators']) && !exact(value,['validators','threshold'])) || !Array.isArray(value.validators) || value.validators.length<1 || value.validators.length>100 ||
     value.validators.some(v=>!address(v)) || new Set(value.validators).size!==value.validators.length ||
     typeof value.threshold!=='number' || !Number.isInteger(value.threshold) || value.threshold<1 || value.threshold>value.validators.length)throw new Error('Invalid explicit quorum policy');
+  if(Object.hasOwn(value,'schema')){
+    const n=value.validators.length,f=value.maxFaultyValidators,q=value.threshold;
+    if(value.schema!=='sentinel-quorum-policy/v2' || typeof f!=='number' || !Number.isInteger(f) || f<0 || f>=n || q>n-f || 2*q<=n+f)
+      throw new Error('Invalid quorum fault bound or honest intersection');
+    return sha256(Buffer.from('sentinel/quorum-policy/v2\n'+JSON.stringify([[...value.validators].sort(),q,f])));
+  }
   return sha256(Buffer.from('sentinel/quorum-policy/v1\n'+JSON.stringify([[...value.validators].sort(),value.threshold])));
 }
 // Sorted object keys; preserve array order because tiers and contribution order are meaningful.
@@ -56,6 +62,7 @@ export async function verifyScoreQuorum(values:unknown,expected:ScoreTarget,poli
   // Snapshot caller inputs before verifying so asynchronous mutation cannot change expectations.
   const fields=JSON.stringify(targetFields(expected)),target=structuredClone(expected);
   const policySha256=quorumPolicyDigest(policy),allowed=new Set(policy.validators),threshold=policy.threshold;
+  const faultBound='schema' in policy?{maxFaultyValidators:policy.maxFaultyValidators}:null;
   if(!Array.isArray(values) || values.length>allowed.size)throw new Error('Invalid attestation set');
   const attestations=structuredClone(values);
   await cryptoWaitReady();
@@ -66,5 +73,5 @@ export async function verifyScoreQuorum(values:unknown,expected:ScoreTarget,poli
     signers.add(value.validator);
   }
   if(signers.size<threshold)throw new Error('Insufficient score attestations');
-  return {schema:'sentinel-score-quorum/v1',target,policySha256,threshold,signers:[...signers].sort(),weights:null,rewards:null};
+  return {schema:faultBound?'sentinel-score-quorum/v2':'sentinel-score-quorum/v1',target,policySha256,threshold,...faultBound,signers:[...signers].sort(),weights:null,rewards:null};
 }
