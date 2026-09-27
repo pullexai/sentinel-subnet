@@ -1,0 +1,3 @@
+bittensor==11.1.0
+bittensor-core==0.1.3
+websockets==16.1.1

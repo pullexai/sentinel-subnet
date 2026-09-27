@@ -5,13 +5,14 @@ import { join } from 'node:path';
 import { cryptoWaitReady,decodeAddress,encodeAddress,sr25519Verify } from '@polkadot/util-crypto';
 import { admit,executionIdentity,reference,type Submission } from './competition';
 import { corpus } from './corpus';
+import { verifyChainAdmission,chainCanonical,chainFresh,type ChainAdmission,type ChainPolicy,type ChainApproval } from './chain-admission';
 
 export type Challenge={schema:'sentinel-challenge/v1';genesis:string;netuid:number;round:string;validator:string;miner:string;nonce:string;issuedAt:number;expiresAt:number};
 export type SignedChallenge={challenge:Challenge;signature:string};
 export type Contribution={schema:'sentinel-contribution/v1';challenge:Challenge;artifactSha256:string;signature:string};
 export type Scope={genesis:string;netuid:number;round:string;validator:string};
 type AdmissionProof={challengeSignature:string;acceptedAt:number;receiptSignature:string};
-type FrozenPractice={schema:'sentinel-frozen-practice/v2';scope:Scope;seed:string;pairs:number;generator:string;fixtureSha256:string;baseline:string;
+type FrozenPractice={schema:'sentinel-frozen-practice/v2'|'sentinel-frozen-practice/v3';chain?:ReturnType<typeof verifyChainAdmission>;scope:Scope;seed:string;pairs:number;generator:string;fixtureSha256:string;baseline:string;
   salt:string;contract:PracticeContract;scorer:string;eligible:string[];closedAt:number;contributions:{miner:string;challenge:Challenge;artifactSha256:string;signature:string;submission:Submission;admission:AdmissionProof}[]};
 export type PracticeContract={schema:'sentinel-practice-contract/v1';commitment:string;pairs:number;generator:'sentinel-corpus/v1';baseline:string;scorer:'sentinel-pareto/v1'};
 const hex=/^[a-f0-9]{64}$/;
@@ -74,26 +75,33 @@ function artifact(bytes:Uint8Array):Submission{
   return JSON.parse(canonical);
 }
 
-export type SnapshotExpectation={cohortSha256:string;scope:Scope;eligible:string[]};
+export type SnapshotExpectation={cohortSha256:string;scope:Scope;eligible:string[];chain?:{policy:ChainPolicy;approval:ChainApproval}};
 export const snapshotByteLimit=8*1024*1024; // Wire ceiling, not a deployment capacity objective.
 export async function evaluateSnapshot(bytes:Uint8Array,expected:SnapshotExpectation){
   if(!(bytes instanceof Uint8Array) || bytes.length>snapshotByteLimit)throw new Error('Snapshot byte limit');
-  if(!exact(expected,['cohortSha256','scope','eligible']) || typeof expected.cohortSha256!=='string' || !hex.test(expected.cohortSha256) ||
+  if(!exact(expected,['cohortSha256','scope','eligible',...(Object.hasOwn(expected,'chain')?['chain']:[])]) || typeof expected.cohortSha256!=='string' || !hex.test(expected.cohortSha256) ||
     !exact(expected.scope,['genesis','netuid','round','validator']) || !Array.isArray(expected.eligible) || expected.eligible.length<1 || expected.eligible.length>10000 ||
     expected.eligible.some(v=>!hotkey(v)) || new Set(expected.eligible).size!==expected.eligible.length)throw new Error('Invalid snapshot expectations');
   scope(expected.scope);
   const expectations=structuredClone(expected),input=Buffer.from(bytes);
   if(sha256(input)!==expectations.cohortSha256)throw new Error('Snapshot digest mismatch');
   const text=new TextDecoder('utf-8',{fatal:true}).decode(input),value=JSON.parse(text);
-  if(JSON.stringify(value)!==text || !exact(value,['schema','scope','seed','pairs','salt','contract','generator','fixtureSha256','baseline','scorer','eligible','closedAt','contributions']))throw new Error('Invalid snapshot schema or noncanonical JSON');
+  if(JSON.stringify(value)!==text || !exact(value,['schema','scope','seed','pairs','salt','contract','generator','fixtureSha256','baseline','scorer','eligible','closedAt','contributions',...(expectations.chain?['chain']:[])]))throw new Error('Invalid snapshot schema or noncanonical JSON');
   const f=value as unknown as FrozenPractice;
-  if(f.schema!=='sentinel-frozen-practice/v2' || !exact(f.scope,['genesis','netuid','round','validator']) ||
+  if(f.schema!==(expectations.chain?'sentinel-frozen-practice/v3':'sentinel-frozen-practice/v2') || !exact(f.scope,['genesis','netuid','round','validator']) ||
     ['genesis','netuid','round','validator'].some(k=>f.scope[k as keyof Scope]!==expectations.scope[k as keyof Scope]) ||
     !Array.isArray(f.eligible) || JSON.stringify(f.eligible)!==JSON.stringify([...expectations.eligible].sort()) ||
     !Number.isSafeInteger(f.closedAt) || f.closedAt<0 || !Array.isArray(f.contributions) || f.contributions.length<1 || f.contributions.length>100)throw new Error('Snapshot scope or cohort mismatch');
   if(practiceRound(f.contract)!==f.scope.round || practiceRound(practiceContract(f.seed,f.salt,f.pairs))!==f.scope.round ||
     f.generator!=='sentinel-corpus/v1' || f.scorer!=='sentinel-pareto/v1' || f.baseline!==executionIdentity(reference) ||
     f.fixtureSha256!==sha256(Buffer.from(JSON.stringify(corpus(f.seed,f.pairs)))))throw new Error('Snapshot benchmark mismatch');
+  if(expectations.chain){
+    if(!exact(expectations.chain,['policy','approval']) || !exact(f.chain,['policy','approval','observation']) || typeof f.chain!.observation!=='string' ||
+      chainCanonical(f.chain!.policy)!==chainCanonical(expectations.chain.policy) || chainCanonical(f.chain!.approval)!==chainCanonical(expectations.chain.approval) ||
+      chainCanonical(expectations.chain.policy.scope)!==chainCanonical(expectations.scope) ||
+      chainCanonical([...expectations.chain.policy.eligible].sort())!==chainCanonical([...expectations.eligible].sort()))throw new Error('Chain replay expectations mismatch');
+    verifyChainAdmission({bytes:Buffer.from(f.chain!.observation),...expectations.chain},f.closedAt);
+  }
   await cryptoWaitReady();
   const miners=new Set<string>(),nonces=new Set<string>();
   for(const contribution of f.contributions){
@@ -106,6 +114,7 @@ export async function evaluateSnapshot(bytes:Uint8Array,expected:SnapshotExpecta
     signature(contributionPayload(c,contribution.artifactSha256 as string),contribution.signature,c.miner);
     const proof=contribution.admission;
     if(!exact(proof,['challengeSignature','acceptedAt','receiptSignature']) || typeof proof.acceptedAt!=='number' || proof.acceptedAt>f.closedAt)throw new Error('Invalid snapshot admission');
+    if(expectations.chain){chainFresh(expectations.chain.approval,c.issuedAt);chainFresh(expectations.chain.approval,proof.acceptedAt);}
     signature(challengePayload(c),proof.challengeSignature,c.validator);
     signature(admissionPayload(c,contribution.artifactSha256 as string,contribution.signature as string,proof.acceptedAt),proof.receiptSignature,c.validator);
     miners.add(c.miner);nonces.add(c.nonce);
@@ -113,16 +122,25 @@ export async function evaluateSnapshot(bytes:Uint8Array,expected:SnapshotExpecta
   const {evaluateCohort}=await import('./validator');
   const report=await evaluateCohort(f.seed,f.pairs,f.contributions.map(c=>({participant:c.miner,submission:c.submission})));
   return {...report,cohortSha256:expectations.cohortSha256,closedAt:f.closedAt,commitment:f.contract,reveal:{seed:f.seed,salt:f.salt},
-    authentication:{scheme:'sr25519',scope:expectations.scope,eligibility:'operator-supplied-hotkey-list'},
-    limitation:'Signed public-template practice. Key possession verified; chain registration, validator independence and hidden generalization unqualified. No weights or rewards.'};
+    authentication:{scheme:'sr25519',scope:expectations.scope,eligibility:expectations.chain?'operator-approved-rpc-observed-registration':'legacy-operator-supplied-hotkey-list',...(expectations.chain?{chain:expectations.chain}: {})},
+    limitation:'Signed public-template practice. Chain evidence, when required, is operator-approved RPC observation, not independent finality or economic eligibility. Validator independence and hidden generalization unqualified. No weights or rewards.'};
 }
 
 export class ContributionInbox{
   private db:Database;
   private policy:Scope;
   private miners:Set<string>;
-  constructor(directory:string,policy:Scope,miners:readonly string[],readonly lifetimeMs:number,private clock=Date.now){
+  private chain?:ReturnType<typeof verifyChainAdmission>;
+  static chainQualified(directory:string,input:ChainAdmission,lifetimeMs:number,clock=Date.now){
+    return new ContributionInbox(directory,input.policy.scope,input.policy.eligible,lifetimeMs,clock,input);
+  }
+  // Without chain input this is explicitly legacy, operator-list-only practice.
+  constructor(directory:string,policy:Scope,miners:readonly string[],readonly lifetimeMs:number,private clock=Date.now,chainInput?:ChainAdmission){
     scope(policy);
+    if(chainInput){
+      this.chain=verifyChainAdmission(chainInput,clock());
+      if(chainCanonical(policy)!==chainCanonical(this.chain.policy.scope) || chainCanonical(miners)!==chainCanonical(this.chain.policy.eligible))throw new Error('Chain scope mismatch');
+    }
     if(!Number.isSafeInteger(lifetimeMs) || lifetimeMs<1 || !miners.length || miners.length>10000 || miners.some(m=>!hotkey(m)) || new Set(miners).size!==miners.length)throw new Error('Explicit eligible hotkeys and lifetime required');
     this.policy={genesis:policy.genesis,netuid:policy.netuid,round:policy.round,validator:policy.validator};this.miners=new Set(miners);
     mkdirSync(directory,{recursive:true,mode:0o700});
@@ -135,13 +153,28 @@ export class ContributionInbox{
       CREATE TABLE IF NOT EXISTS challenges(scope TEXT NOT NULL,miner TEXT NOT NULL,nonce TEXT NOT NULL UNIQUE,challenge TEXT NOT NULL,artifact TEXT,digest TEXT,signature TEXT,accepted_at INTEGER,PRIMARY KEY(scope,miner));
       CREATE TABLE IF NOT EXISTS frozen_practice(scope TEXT PRIMARY KEY,body TEXT NOT NULL,digest TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS practice_contracts(scope TEXT PRIMARY KEY,body TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS admission_proofs(scope TEXT NOT NULL,miner TEXT NOT NULL,proof TEXT NOT NULL,PRIMARY KEY(scope,miner));`);
+      CREATE TABLE IF NOT EXISTS admission_proofs(scope TEXT NOT NULL,miner TEXT NOT NULL,proof TEXT NOT NULL,PRIMARY KEY(scope,miner));
+      CREATE TABLE IF NOT EXISTS chain_bindings(scope TEXT PRIMARY KEY,body TEXT NOT NULL);`);
+    try{this.db.transaction(()=>{
+      const row=this.db.query('SELECT body FROM chain_bindings WHERE scope=?').get(this.scopeId()) as {body:string}|null;
+      if(row){if(!this.chain || row.body!==chainCanonical(this.chain))throw new Error('Persisted chain binding mismatch');}
+      else if(this.chain){
+        if(this.db.query('SELECT 1 FROM practice_contracts WHERE scope=? UNION ALL SELECT 1 FROM challenges WHERE scope=? UNION ALL SELECT 1 FROM frozen_practice WHERE scope=?').get(this.scopeId(),this.scopeId(),this.scopeId()))throw new Error('Cannot qualify existing legacy round');
+        this.db.query('INSERT INTO chain_bindings(scope,body) VALUES(?,?)').run(this.scopeId(),chainCanonical(this.chain));
+      }
+    }).immediate();}catch(error){this.db.close();throw error;}
   }
   private scopeId(){return JSON.stringify([this.policy.genesis,this.policy.netuid,this.policy.round,this.policy.validator]);}
-  private ensureOpen(){if(this.db.query('SELECT 1 FROM frozen_practice WHERE scope=?').get(this.scopeId()))throw new Error('Practice cohort closed');}
+  private ensureChain(){
+    const row=this.db.query('SELECT body FROM chain_bindings WHERE scope=?').get(this.scopeId()) as {body:string}|null;
+    if((row?.body ?? null)!==(this.chain?chainCanonical(this.chain):null))throw new Error('Persisted chain binding mismatch');
+    if(this.chain)chainFresh(this.chain.approval,this.clock());
+  }
+  private ensureOpen(){this.ensureChain();if(this.db.query('SELECT 1 FROM frozen_practice WHERE scope=?').get(this.scopeId()))throw new Error('Practice cohort closed');}
   registerPractice(contract:PracticeContract){
     if(practiceRound(contract)!==this.policy.round)throw new Error('Practice round commitment mismatch');
     return this.db.transaction(()=>{
+      this.ensureChain();
       const existing=this.db.query('SELECT body FROM practice_contracts WHERE scope=?').get(this.scopeId()) as {body:string}|null;
       if(existing){if(practiceRound(JSON.parse(existing.body))!==this.policy.round)throw new Error('Stored practice contract mismatch');return this.policy.round;}
       if(this.db.query('SELECT 1 FROM challenges WHERE scope=?').get(this.scopeId()) || this.db.query('SELECT 1 FROM frozen_practice WHERE scope=?').get(this.scopeId()))throw new Error('Cannot retroactively commit practice');
@@ -149,6 +182,7 @@ export class ContributionInbox{
     }).immediate();
   }
   private committedPractice(){
+    this.ensureChain();
     const row=this.db.query('SELECT body FROM practice_contracts WHERE scope=?').get(this.scopeId()) as {body:string}|null;
     if(!row)throw new Error('Commit practice before admission');
     const contract=JSON.parse(row.body) as PracticeContract;
@@ -235,7 +269,7 @@ export class ContributionInbox{
       if(contributions.length<1 || contributions.length>100)throw new Error('Frozen practice requires 1–100 admitted miners');
       const closedAt=this.clock();if(!Number.isSafeInteger(closedAt) || closedAt<0)throw new Error('Invalid closure time');
       if(contributions.some(c=>c.admission.acceptedAt>closedAt))throw new Error('Closure precedes admission');
-      const frozen:FrozenPractice={schema:'sentinel-frozen-practice/v2',scope:{...this.policy},seed,pairs,salt,contract:revealed,generator:'sentinel-corpus/v1',fixtureSha256,
+      const frozen:FrozenPractice={schema:this.chain?'sentinel-frozen-practice/v3':'sentinel-frozen-practice/v2',...(this.chain?{chain:this.chain}:{}),scope:{...this.policy},seed,pairs,salt,contract:revealed,generator:'sentinel-corpus/v1',fixtureSha256,
         baseline:executionIdentity(reference),scorer:'sentinel-pareto/v1',eligible:[...this.miners].sort(),closedAt,contributions};
       const body=JSON.stringify(frozen),digest=sha256(Buffer.from(body));
       if(Buffer.byteLength(body)>snapshotByteLimit)throw new Error('Snapshot byte limit');
@@ -251,7 +285,7 @@ export class ContributionInbox{
     this.committedPractice();
     if(practiceRound(frozen.contract)!==this.policy.round || practiceRound(practiceContract(frozen.seed,frozen.salt,frozen.pairs))!==this.policy.round)throw new Error('Frozen practice commitment mismatch');
     if(JSON.stringify(frozen.eligible)!==JSON.stringify([...this.miners].sort()))throw new Error('Frozen practice eligibility conflict');
-    if(frozen.schema!=='sentinel-frozen-practice/v2' || JSON.stringify(frozen.scope)!==JSON.stringify(this.policy) ||
+    if(frozen.schema!==(this.chain?'sentinel-frozen-practice/v3':'sentinel-frozen-practice/v2') || chainCanonical(frozen.chain??null)!==chainCanonical(this.chain??null) || JSON.stringify(frozen.scope)!==JSON.stringify(this.policy) ||
       frozen.generator!=='sentinel-corpus/v1' || frozen.scorer!=='sentinel-pareto/v1' || frozen.baseline!==executionIdentity(reference) ||
       frozen.fixtureSha256!==sha256(Buffer.from(JSON.stringify(corpus(frozen.seed,frozen.pairs)))))throw new Error('Frozen practice implementation mismatch');
     return frozen;
@@ -263,7 +297,7 @@ export class ContributionInbox{
   }
   async evaluatePractice(){
     const bytes=this.exportPractice();
-    return evaluateSnapshot(bytes,{cohortSha256:sha256(bytes),scope:{...this.policy},eligible:[...this.miners]});
+    return evaluateSnapshot(bytes,{cohortSha256:sha256(bytes),scope:{...this.policy},eligible:[...this.miners],...(this.chain?{chain:{policy:this.chain.policy,approval:this.chain.approval}}:{})});
   }
   close(){this.db.close();}
 }

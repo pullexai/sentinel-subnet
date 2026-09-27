@@ -1,6 +1,6 @@
 import { expect,test } from 'bun:test';
 import { corpus,proveFixture,families } from '../src/corpus';
-import { admit,compare,executionIdentity,measure,mine,reference } from '../src/competition';
+import { admit,benchmark,compare,executionIdentity,measure,mine,reference } from '../src/competition';
 import { evaluateCohort } from '../src/validator';
 import { parseInput } from '../src/miner';
 
@@ -55,4 +55,24 @@ test('validator deduplicates clones and ranks reproducibly without generating we
   expect(replay.tiers).toEqual(report.tiers);
   expect(report.weights).toBeNull(); expect(report.rewards).toBeNull();
   await expect(evaluateCohort('b'.repeat(64),1,[candidates[0],candidates[0]])).rejects.toThrow('cohort');
+},30000);
+
+test('evaluation seals admitted bytes before asynchronous oracle execution',async()=>{
+  const submission=structuredClone(reference),digest=executionIdentity(submission);
+  const pending=evaluateCohort('c'.repeat(64),1,[{participant:'sealed',submission}]);
+  submission.rules[0].literal='no-matching-content';
+  const report=await pending;
+  expect(report.results[0].digest).toBe(digest);
+  expect(report.results[0].comparison.candidate).toMatchObject({tp:4,fp:0,fn:0});
+  const single=structuredClone(reference),measured=benchmark('c'.repeat(64),1,single);
+  single.rules.splice(0,single.rules.length,{id:'changed',literal:'no-matching-content'});
+  expect(await measured).toMatchObject({executionIdentity:digest,versusEmpty:{candidate:{tp:4,fp:0,fn:0}}});
+  const saved=structuredClone(reference),baselineRun=evaluateCohort('c'.repeat(64),1,[{participant:'sealed',submission:saved}]),singleRun=benchmark('c'.repeat(64),1,saved);
+  try{
+    reference.rules[0].literal='mutated-baseline';
+    const [cohort,individual]=await Promise.all([baselineRun,singleRun]);
+    expect(cohort.comparisonId).toBe(report.comparisonId);
+    expect(cohort.results[0].comparison.baseline).toMatchObject({tp:4,fp:0,fn:0});
+    expect(individual.versusTemplateReference.baseline).toMatchObject({tp:4,fp:0,fn:0});
+  }finally{reference.rules=saved.rules;}
 },30000);

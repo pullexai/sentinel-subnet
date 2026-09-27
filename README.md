@@ -29,7 +29,11 @@ The count is bug/control pairs **per family**: `2` yields 16 programs. Export in
 
 Reports include TP/FP/FN, clean-case false positives, precision/recall, per-family counts, recovered/lost baseline detections, wall time, CPU usage and whole-process RSS. Resource observations are noisy local measurements, not candidate-isolated peak memory or production capacity. Duplicate findings at one file do not multiply a single fixture defect's credit. Clone grouping does not solve semantic copying or Sybil identities. Ranking never imports or activates anything in the private product.
 
+Evaluation copies admitted candidate and baseline data before asynchronous oracle execution. Mutating a caller-owned rule array while those oracles run cannot change the bytes scored under an earlier execution digest. `tests/competition.test.ts` exercises this for cohort and single-submission evaluation. This fixes local input consistency; it does not add semantic-clone or network consensus protection.
+
 ## Required before network readiness
+
+[chain/README.md](chain/README.md) documents the optional pinned official-SDK read-only observer and `ContributionInbox.chainQualified` admission. It binds separately approved finalized observations, registrations and subnet incarnation; portable snapshot v3 retains that evidence and requires independent replay expectations. Actual local runtime-424 reads passed. Operator-trusted RPC observation is not independent finality, economic eligibility, transport qualification or network activation.
 
 [ADMISSION.md](ADMISSION.md) adds coordinator-signed admission receipts and retained challenge signatures to snapshot v2. Closure requires these proofs; replay verifies declared admission bounds. This authenticates coordinator clock statements, not independent time or delivery.
 

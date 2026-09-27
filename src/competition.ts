@@ -67,6 +67,8 @@ export const reference: Submission = { schema:'sentinel-literal-miner/v1',rules:
 ] };
 
 export async function benchmark(seed: string,pairs: number,submission: Submission) {
+  submission=structuredClone(admit(submission));
+  const baseline=structuredClone(admit(reference));
   const fixtures = corpus(seed,pairs);
   for (const fixture of fixtures) await proveFixture(fixture);
   const run = (candidate: Submission) => {
@@ -75,7 +77,7 @@ export async function benchmark(seed: string,pairs: number,submission: Submissio
     return { outputs,resources:{ elapsedMs:performance.now()-start,cpuMicroseconds:process.cpuUsage(cpu),
       processRssBytes:process.memoryUsage.rss(),inputBytes:fixtures.reduce((n,f)=>n+Buffer.byteLength(JSON.stringify(f.input)),0) } };
   };
-  const measured=run(submission),control=run(reference);
+  const measured=run(submission),control=run(baseline);
   return { schema:'sentinel-practice-report/v1',syntheticOnly:true,publicTemplateFamilies:true,
     generator:'sentinel-corpus/v1',seed,cases:fixtures.length,executionIdentity:executionIdentity(submission),
     versusEmpty:compare(fixtures,new Map(),measured.outputs),versusTemplateReference:compare(fixtures,control.outputs,measured.outputs),
