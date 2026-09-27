@@ -15,6 +15,8 @@ export function chainFresh(approval:ChainApproval,now:number){
   if(!integer(now) || now<approval.observedAt || now-approval.observedAt>=approval.maxAgeMs)throw new Error('Chain approval expired or future-dated');
 }
 // Approval is private operator input, never derived from the received envelope.
+// Verification is at the supplied time only. Live inbox operations additionally check
+// durable local revocation; historical replay makes no current-eligibility claim.
 export function verifyChainAdmission(input:ChainAdmission,now:number){
   const p=structuredClone(input.policy),a=structuredClone(input.approval);
   if(!exact(p,['scope','eligible','creationHeight','creationHash','owner','ownerHotkey','runtime','metadataSha256']) ||

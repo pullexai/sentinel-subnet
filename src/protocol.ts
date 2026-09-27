@@ -122,7 +122,7 @@ export async function evaluateSnapshot(bytes:Uint8Array,expected:SnapshotExpecta
   const {evaluateCohort}=await import('./validator');
   const report=await evaluateCohort(f.seed,f.pairs,f.contributions.map(c=>({participant:c.miner,submission:c.submission})));
   return {...report,cohortSha256:expectations.cohortSha256,closedAt:f.closedAt,commitment:f.contract,reveal:{seed:f.seed,salt:f.salt},
-    authentication:{scheme:'sr25519',scope:expectations.scope,eligibility:expectations.chain?'operator-approved-rpc-observed-registration':'legacy-operator-supplied-hotkey-list',...(expectations.chain?{chain:expectations.chain}: {})},
+    authentication:{scheme:'sr25519',scope:expectations.scope,eligibility:expectations.chain?'operator-approved-rpc-observed-registration':'legacy-operator-supplied-hotkey-list',...(expectations.chain?{chain:expectations.chain,evidenceUse:'historical-replay',currentEligibility:'not-assessed',revocationStatus:'not-assessed'}: {})},
     limitation:'Signed public-template practice. Chain evidence, when required, is operator-approved RPC observation, not independent finality or economic eligibility. Validator independence and hidden generalization unqualified. No weights or rewards.'};
 }
 
@@ -138,7 +138,8 @@ export class ContributionInbox{
   constructor(directory:string,policy:Scope,miners:readonly string[],readonly lifetimeMs:number,private clock=Date.now,chainInput?:ChainAdmission){
     scope(policy);
     if(chainInput){
-      this.chain=verifyChainAdmission(chainInput,clock());
+      // Existing bindings may reopen for historical export or local revocation after expiry.
+      this.chain=verifyChainAdmission(chainInput,chainInput.approval.observedAt);
       if(chainCanonical(policy)!==chainCanonical(this.chain.policy.scope) || chainCanonical(miners)!==chainCanonical(this.chain.policy.eligible))throw new Error('Chain scope mismatch');
     }
     if(!Number.isSafeInteger(lifetimeMs) || lifetimeMs<1 || !miners.length || miners.length>10000 || miners.some(m=>!hotkey(m)) || new Set(miners).size!==miners.length)throw new Error('Explicit eligible hotkeys and lifetime required');
@@ -154,21 +155,39 @@ export class ContributionInbox{
       CREATE TABLE IF NOT EXISTS frozen_practice(scope TEXT PRIMARY KEY,body TEXT NOT NULL,digest TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS practice_contracts(scope TEXT PRIMARY KEY,body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS admission_proofs(scope TEXT NOT NULL,miner TEXT NOT NULL,proof TEXT NOT NULL,PRIMARY KEY(scope,miner));
-      CREATE TABLE IF NOT EXISTS chain_bindings(scope TEXT PRIMARY KEY,body TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS chain_bindings(scope TEXT PRIMARY KEY,body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS chain_revocations(scope TEXT PRIMARY KEY,revoked_at INTEGER NOT NULL);`);
     try{this.db.transaction(()=>{
       const row=this.db.query('SELECT body FROM chain_bindings WHERE scope=?').get(this.scopeId()) as {body:string}|null;
       if(row){if(!this.chain || row.body!==chainCanonical(this.chain))throw new Error('Persisted chain binding mismatch');}
       else if(this.chain){
+        chainFresh(this.chain.approval,this.clock());
         if(this.db.query('SELECT 1 FROM practice_contracts WHERE scope=? UNION ALL SELECT 1 FROM challenges WHERE scope=? UNION ALL SELECT 1 FROM frozen_practice WHERE scope=?').get(this.scopeId(),this.scopeId(),this.scopeId()))throw new Error('Cannot qualify existing legacy round');
         this.db.query('INSERT INTO chain_bindings(scope,body) VALUES(?,?)').run(this.scopeId(),chainCanonical(this.chain));
       }
     }).immediate();}catch(error){this.db.close();throw error;}
   }
   private scopeId(){return JSON.stringify([this.policy.genesis,this.policy.netuid,this.policy.round,this.policy.validator]);}
-  private ensureChain(){
+  private ensureChain(active=true){
     const row=this.db.query('SELECT body FROM chain_bindings WHERE scope=?').get(this.scopeId()) as {body:string}|null;
     if((row?.body ?? null)!==(this.chain?chainCanonical(this.chain):null))throw new Error('Persisted chain binding mismatch');
-    if(this.chain)chainFresh(this.chain.approval,this.clock());
+    if(this.chain && active){
+      if(this.db.query('SELECT 1 FROM chain_revocations WHERE scope=?').get(this.scopeId()))throw new Error('Chain approval revoked');
+      chainFresh(this.chain.approval,this.clock());
+    }
+  }
+  // ponytail: revocation is permanent for this scope; refresh requires a new round.
+  revokeChainApproval(){
+    return this.db.transaction(()=>{
+      this.ensureChain(false);
+      if(!this.chain)throw new Error('Chain approval required for revocation');
+      const existing=this.db.query('SELECT revoked_at FROM chain_revocations WHERE scope=?').get(this.scopeId()) as {revoked_at:number}|null;
+      if(existing)return {revokedAt:existing.revoked_at};
+      const revokedAt=this.clock();
+      if(!Number.isSafeInteger(revokedAt) || revokedAt<0)throw new Error('Invalid revocation time');
+      this.db.query('INSERT INTO chain_revocations(scope,revoked_at) VALUES(?,?)').run(this.scopeId(),revokedAt);
+      return {revokedAt};
+    }).immediate();
   }
   private ensureOpen(){this.ensureChain();if(this.db.query('SELECT 1 FROM frozen_practice WHERE scope=?').get(this.scopeId()))throw new Error('Practice cohort closed');}
   registerPractice(contract:PracticeContract){
@@ -181,8 +200,8 @@ export class ContributionInbox{
       this.db.query('INSERT INTO practice_contracts(scope,body) VALUES(?,?)').run(this.scopeId(),JSON.stringify(contract));return this.policy.round;
     }).immediate();
   }
-  private committedPractice(){
-    this.ensureChain();
+  private committedPractice(active=true){
+    this.ensureChain(active);
     const row=this.db.query('SELECT body FROM practice_contracts WHERE scope=?').get(this.scopeId()) as {body:string}|null;
     if(!row)throw new Error('Commit practice before admission');
     const contract=JSON.parse(row.body) as PracticeContract;
@@ -197,6 +216,7 @@ export class ContributionInbox{
       const existing=this.db.query('SELECT challenge FROM challenges WHERE scope=? AND miner=?').get(this.scopeId(),miner) as {challenge:string}|null;
       if(existing)return JSON.parse(existing.challenge);
       const issuedAt=this.clock();
+      if(this.chain)chainFresh(this.chain.approval,issuedAt);
       const c:Challenge={schema:'sentinel-challenge/v1',...this.policy,miner,nonce:randomBytes(32).toString('hex'),issuedAt,expiresAt:issuedAt+this.lifetimeMs};challenge(c);
       this.db.query('INSERT INTO challenges(scope,miner,nonce,challenge) VALUES(?,?,?,?)').run(this.scopeId(),miner,c.nonce,JSON.stringify(c));return c;
     }).immediate();
@@ -214,6 +234,7 @@ export class ContributionInbox{
       this.committedPractice();
       const row=this.db.query('SELECT challenge,artifact FROM challenges WHERE scope=? AND miner=? AND nonce=?').get(this.scopeId(),c.miner,c.nonce) as {challenge:string;artifact:string|null}|null;
       const now=this.clock();
+      if(this.chain)chainFresh(this.chain.approval,now);
       if(!Number.isSafeInteger(now) || !row || !challengePayload(JSON.parse(row.challenge)).equals(challengePayload(c)) || now<c.issuedAt || now>=c.expiresAt)throw new Error('Unknown or expired challenge');
       if(row.artifact!==null)throw new Error('Contribution replay');
       this.db.query('UPDATE challenges SET artifact=?,digest=?,signature=?,accepted_at=? WHERE scope=? AND miner=?').run(JSON.stringify(submission),digest,value.signature as string,now,this.scopeId(),c.miner);
@@ -268,6 +289,7 @@ export class ContributionInbox{
       });
       if(contributions.length<1 || contributions.length>100)throw new Error('Frozen practice requires 1–100 admitted miners');
       const closedAt=this.clock();if(!Number.isSafeInteger(closedAt) || closedAt<0)throw new Error('Invalid closure time');
+      if(this.chain)chainFresh(this.chain.approval,closedAt);
       if(contributions.some(c=>c.admission.acceptedAt>closedAt))throw new Error('Closure precedes admission');
       const frozen:FrozenPractice={schema:this.chain?'sentinel-frozen-practice/v3':'sentinel-frozen-practice/v2',...(this.chain?{chain:this.chain}:{}),scope:{...this.policy},seed,pairs,salt,contract:revealed,generator:'sentinel-corpus/v1',fixtureSha256,
         baseline:executionIdentity(reference),scorer:'sentinel-pareto/v1',eligible:[...this.miners].sort(),closedAt,contributions};
@@ -282,7 +304,7 @@ export class ContributionInbox{
     if(!stored)throw new Error('Close practice cohort before evaluation');
     if(sha256(Buffer.from(stored.body))!==stored.digest)throw new Error('Frozen practice integrity failure');
     const frozen=JSON.parse(stored.body) as FrozenPractice;
-    this.committedPractice();
+    this.committedPractice(false);
     if(practiceRound(frozen.contract)!==this.policy.round || practiceRound(practiceContract(frozen.seed,frozen.salt,frozen.pairs))!==this.policy.round)throw new Error('Frozen practice commitment mismatch');
     if(JSON.stringify(frozen.eligible)!==JSON.stringify([...this.miners].sort()))throw new Error('Frozen practice eligibility conflict');
     if(frozen.schema!==(this.chain?'sentinel-frozen-practice/v3':'sentinel-frozen-practice/v2') || chainCanonical(frozen.chain??null)!==chainCanonical(this.chain??null) || JSON.stringify(frozen.scope)!==JSON.stringify(this.policy) ||

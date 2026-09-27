@@ -61,6 +61,20 @@ Owner values describe state **at the observed finalized block**, not necessarily
 
 An additive SQLite `chain_bindings` table stores the exact approved policy and approval per round scope in an IMMEDIATE transaction. Reopening requires identical binding. Legacy handles check the binding before mutation, so a handle opened before qualification cannot bypass it. Existing legacy rounds with contracts, challenges or frozen state cannot be retroactively qualified. Expired approvals require a new round; this increment has no in-place approval refresh. Stop older library writers before upgrading: older binaries do not enforce the new table.
 
+### Local operator revocation
+
+Trusted local API command: `inbox.revokeChainApproval()`, returning `{revokedAt}` (local Unix milliseconds). Invoke only through the private operator control path, never a contribution endpoint. The inbox must use the exact already-approved chain binding. Example from an operator's Bun script:
+
+```ts
+const inbox = ContributionInbox.chainQualified(directory, approvedInput, lifetimeMs);
+try { console.log(inbox.revokeChainApproval()); }
+finally { inbox.close(); }
+```
+
+An additive `chain_revocations` SQLite table permanently revokes that complete round scope in an IMMEDIATE transaction. Repeat calls return the original timestamp. Existing handles and restarted processes consult the durable record before issuing challenges, accepting pending contributions, writing admission receipts (including after asynchronous signing), registering contracts or closing cohorts. Transactions serialize revocation against these writes; already committed writes remain historical. Other round scopes are unaffected, even when they share observation bytes. Revocation is local to this inbox database, not a chain transaction, distributed broadcast or externally witnessed revocation proof. Protect and retain the database; restoring an older backup can lose revocations.
+
+Exact existing bindings may reopen after expiry or revocation for revocation/export/replay; new bindings still require fresh approval. Live mutations always enforce freshness and revocation. There is no un-revoke or in-place approval refresh: use a newly committed round with separately approved evidence. Revocation never edits frozen bytes, signed receipts or cohort digests. Stop all older writers before migration; they do not enforce revocation.
+
 The original `new ContributionInbox(...)` remains explicitly **legacy, unqualified operator-list practice**. It cannot reopen a chain-bound scope. Legacy snapshots retain `sentinel-frozen-practice/v2`. Chain-bound snapshots use **`sentinel-frozen-practice/v3`**, adding `chain: {policy, approval, observation}`; `observation` is the exact accepted observer envelope string. These bytes enter the cohort SHA-256 and therefore the score-attestation target.
 
 Portable replay requires separate trusted expectations `{cohortSha256, scope, eligible, chain: {policy, approval}}` for v3. The chain policy and approval must match the external expectations exactly; the verifier checks observation digest, policy digest, incarnation/owners/runtime, finalized height/hash and participant registrations. Freshness is checked at recorded issuance, acceptance and closure times, not the later replay wall clock. Admission times remain coordinator-signed claims, not independent timestamps. A v3 snapshot without chain expectations is rejected; a v2 snapshot with chain expectations is rejected. Removing, replacing or relabeling evidence cannot satisfy the original external digest and chain expectations.
@@ -69,7 +83,7 @@ Portable replay requires separate trusted expectations `{cohortSha256, scope, el
 
 Migration: pre-publication chain bindings that omitted `observation` cannot reopen under this binding format. Retain old evidence; use a new practice round. Existing v2 legacy snapshots and operator-list rounds remain v2. No retroactive qualification or v2-to-v3 relabeling is supported. Stop old writers before upgrading.
 
-Remaining gates: independently witnessed observation provenance/finality; external revocation/refresh policy; authenticated transport; independently operated validators. Registration, network activation and economic execution remain separate work.
+Remaining gates: independently witnessed observation provenance/finality; distributed revocation and approval-refresh policy; authenticated transport; independently operated validators. Registration, network activation and economic execution remain separate work.
 
 ## Qualification evidence
 
