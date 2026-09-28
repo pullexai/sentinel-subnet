@@ -120,10 +120,10 @@ export function envelopeBytes(payload:ContributionPayload,signatureHex:string){
   return jcsBytes({payload,signature:{scheme:'sr25519',public_key:payload.submitter.hotkey_public_key,value:signatureHex}});
 }
 
-// Bounded canonical parse and schema checks, then signature, then trusted-policy binding.
-// Registration/lineage against finalized chain state is the caller's next, separate step.
-export async function verifyContribution(bytes:Uint8Array,expected:ContributionExpectation){
-  const e=structuredClone(expected),wire=Buffer.from(bytes);
+// Bounded canonical parse and schema checks, then signature. No policy binding yet: intake uses this
+// to recognise an exact replay of an already recorded contribution even after it expires.
+export async function verifyEnvelopeSignature(bytes:Uint8Array){
+  const wire=Buffer.from(bytes);
   const envelope=object(parseCanonical(wire,contributionByteLimit),['payload','signature'],'envelope');
   const payload=validatePayload(envelope.payload);
   const sig=object(envelope.signature,['scheme','public_key','value'],'signature');
@@ -134,28 +134,40 @@ export async function verifyContribution(bytes:Uint8Array,expected:ContributionE
   let valid=false;
   try{valid=sr25519Verify(message,Buffer.from(sig.value as string,'hex'),Buffer.from(sig.public_key as string,'hex'));}catch{}
   if(!valid)throw new Error('Invalid sr25519 signature');
+  return {payload,contribution_id:sha256(message)};
+}
+// Trusted binding: network domain object, window, policy, baseline, validity window.
+export function checkBinding(payload:ContributionPayload,expected:ContributionExpectation){
+  const e=structuredClone(expected);
   if(jcs(payload.network)!==jcs(e.network))reject('network domain');
   if(payload.window_id!==e.window_id || payload.policy_sha256!==e.policy_sha256 || payload.baseline_bundle_sha256!==e.baseline_bundle_sha256)reject('window or policy binding');
   const issued=BigInt(payload.issued_at),expires=BigInt(payload.expires_at);
   if(issued>e.now+e.max_skew_seconds || e.now>=expires || expires-issued>e.max_lifetime_seconds)reject('validity window');
-  return {payload,contribution_id:sha256(message)};
+}
+// Registration/lineage against finalized chain state is the caller's next, separate step.
+export async function verifyContribution(bytes:Uint8Array,expected:ContributionExpectation){
+  const verified=await verifyEnvelopeSignature(bytes);
+  checkBinding(verified.payload,expected);
+  return verified;
 }
 
 // Durable replay fence keyed by (network domain, hotkey, nonce). Exact replay returns the same
 // receipt; a different contribution under the same nonce is `nonce_conflict`.
 export class ContributionNonceLedger{
   private db:Database;
-  constructor(file:string){
-    this.db=new Database(file,{create:true,strict:true});
+  constructor(file:string|Database){
+    this.db=typeof file==='string'?new Database(file,{create:true,strict:true}):file;
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS engine_nonces(domain TEXT NOT NULL,hotkey TEXT NOT NULL,nonce TEXT NOT NULL,contribution_id TEXT NOT NULL,PRIMARY KEY(domain,hotkey,nonce));`);
   }
-  record(verified:{payload:ContributionPayload;contribution_id:string}):'received'|'replay'{
+  // `onReceived` runs inside the same immediate transaction, so callers can atomically add receipt,
+  // quota and queue rows; if it throws, the nonce is not recorded either.
+  record(verified:{payload:ContributionPayload;contribution_id:string},onReceived?:()=>void):'received'|'replay'{
     const {payload:p,contribution_id}=verified,domain=jcs(p.network);
     return this.db.transaction(()=>{
       const row=this.db.query('SELECT contribution_id FROM engine_nonces WHERE domain=? AND hotkey=? AND nonce=?').get(domain,p.submitter.hotkey_public_key,p.nonce) as {contribution_id:string}|null;
       if(row){if(row.contribution_id!==contribution_id)throw new Error('nonce_conflict');return 'replay' as const;}
-      this.db.query('INSERT INTO engine_nonces VALUES(?,?,?,?)').run(domain,p.submitter.hotkey_public_key,p.nonce,contribution_id);return 'received' as const;
+      this.db.query('INSERT INTO engine_nonces VALUES(?,?,?,?)').run(domain,p.submitter.hotkey_public_key,p.nonce,contribution_id);onReceived?.();return 'received' as const;
     }).immediate();
   }
   close(){this.db.close();}

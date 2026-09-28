@@ -18,7 +18,8 @@
     "validator:replay": "bun src/replay.ts",
     "validator:attest": "bun src/validator-attest.ts",
     "validator:transcript": "bun src/validator-transcript.ts",
-    "holdout": "bun src/holdout.ts"
+    "holdout": "bun src/holdout.ts",
+    "engine:intake": "bun src/engine-intake.ts"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",

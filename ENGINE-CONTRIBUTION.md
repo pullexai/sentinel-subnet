@@ -26,4 +26,6 @@ The practice lane (`sentinel-contribution/v1`, `sentinel/challenge/sr25519/v1`, 
 
 ## Not covered
 
-Registration/lineage verification, origin fetching, policy resolution (EC-01/03), `btauth/1`, attestation/release envelopes (EC-08/12) and cross-language vectors beyond the optional native-Python check in `tests/sr25519.interop.ts` (`SR25519_PYTHON=... bun test ./tests/sr25519.interop.ts`).
+Registration/lineage verification, policy resolution (EC-01), `btauth/1`, attestation/release envelopes (EC-08/12) and cross-language vectors beyond the optional native-Python check in `tests/sr25519.interop.ts` (`SR25519_PYTHON=... bun test ./tests/sr25519.interop.ts`).
+
+The local EC-03 intake, fetcher and sandboxed evaluation built on this envelope are described in [ENGINE-INTAKE.md](ENGINE-INTAKE.md).
