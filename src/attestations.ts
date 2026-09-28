@@ -27,7 +27,7 @@ export function quorumPolicyDigest(value:unknown){
   return sha256(Buffer.from('sentinel/quorum-policy/v1\n'+JSON.stringify([[...value.validators].sort(),value.threshold])));
 }
 // Sorted object keys; preserve array order because tiers and contribution order are meaningful.
-function canonical(value:unknown):string{
+export function canonical(value:unknown):string{
   if(value===null || typeof value==='boolean' || typeof value==='string')return JSON.stringify(value);
   if(typeof value==='number' && Number.isFinite(value))return JSON.stringify(value);
   if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';

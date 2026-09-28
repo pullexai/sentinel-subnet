@@ -4,6 +4,17 @@ import {snapshotByteLimit,type SnapshotExpectation} from './protocol';
 import {VoteJournal} from './vote-journal';
 import {quorumPolicyDigest,type QuorumPolicy} from './attestations';
 
+// Disposable local practice custody only; callers persist their signing intent first.
+export async function signPractice(payload:Uint8Array,validator:string,keyPath:string){
+  const seed=await boundedFile(keyPath,32,true);let key:ReturnType<typeof sr25519PairFromSeed>|undefined;
+  try{
+    if(seed.length!==32)throw new Error('Private seed must contain exactly 32 raw bytes');
+    await cryptoWaitReady();key=sr25519PairFromSeed(seed);seed.fill(0);
+    if(encodeAddress(key.publicKey,42)!==validator)throw new Error('Signing key does not match validator');
+    return Buffer.from(sr25519Sign(payload,key)).toString('hex');
+  }finally{seed.fill(0);key?.secretKey.fill(0);}
+}
+
 if(import.meta.main){
   let journal:VoteJournal|undefined;
   try{
@@ -16,18 +27,7 @@ if(import.meta.main){
     const expected=await json(expectations) as SnapshotExpectation,policy=await json(policyPath) as QuorumPolicy;
     quorumPolicyDigest(policy);
     journal=new VoteJournal(directory,policy);
-    const result=await journal.evaluateAndSign(await boundedFile(snapshot,snapshotByteLimit),expected,validator,
-      async payload=>{
-        // Practice-only local custody: load no secret until evaluation finishes and
-        // the durable lock is committed. Network custody needs an isolated signer.
-        const seed=await boundedFile(keyPath,32,true);let key:ReturnType<typeof sr25519PairFromSeed>|undefined;
-        try{
-          if(seed.length!==32)throw new Error('Private seed must contain exactly 32 raw bytes');
-          await cryptoWaitReady();key=sr25519PairFromSeed(seed);seed.fill(0);
-          if(encodeAddress(key.publicKey,42)!==validator)throw new Error('Signing key does not match validator');
-          return Buffer.from(sr25519Sign(payload,key)).toString('hex');
-        }finally{seed.fill(0);key?.secretKey.fill(0);}
-      });
+    const result=await journal.evaluateAndSign(await boundedFile(snapshot,snapshotByteLimit),expected,validator,payload=>signPractice(payload,validator,keyPath));
     console.log(JSON.stringify(result));
   }catch(error){console.error(error instanceof Error?error.message:'Validator attestation failed');process.exitCode=1;}
   finally{journal?.close();}

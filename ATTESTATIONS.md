@@ -1,5 +1,7 @@
 # Validator score attestations
 
+For the separate complete-roster commit/open practice v2 lane, see [TRANSCRIPTS.md](TRANSCRIPTS.md). V1 score-only behavior below is retained; a v2 transcript-set certificate uses distinct domains/schema and cannot substitute for this quorum receipt.
+
 `src/attestations.ts` verifies an explicitly selected set of sr25519 keys agreeing on the **same locally expected result target**. This is a certificate verifier, not distributed consensus, validator independence, chain eligibility, score correctness or finality.
 
 ## Use

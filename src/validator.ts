@@ -3,8 +3,9 @@ import { corpus,proveFixture } from './corpus';
 import { admit,compare,executionIdentity,mine,reference,type Submission } from './competition';
 
 export type Candidate = { participant:string; submission:Submission };
+export type PracticeTuple = {role:'baseline'|'candidate';executionIdentity:string;caseId:string;trialIndex:0;paths:string[]};
 const participant = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
-export async function evaluateCohort(seed: string,pairs: number,candidates: Candidate[],baseline: Submission=reference) {
+export async function evaluateCohort(seed: string,pairs: number,candidates: Candidate[],baseline: Submission=reference,capture?:(tuples:PracticeTuple[])=>void) {
   if (!Array.isArray(candidates) || candidates.length<1 || candidates.length>100 ||
     candidates.some(c => !c || Object.keys(c).sort().join(',')!=='participant,submission' || typeof c.participant!=='string' || !participant.test(c.participant)) ||
     new Set(candidates.map(c => c.participant)).size!==candidates.length) throw new Error('Invalid practice cohort');
@@ -19,10 +20,16 @@ export async function evaluateCohort(seed: string,pairs: number,candidates: Cand
   const baselineSubmission=structuredClone(admit(baseline)),baselineDigest=executionIdentity(baselineSubmission);
   const fixtures=corpus(seed,pairs);
   for (const fixture of fixtures) await proveFixture(fixture);
-  const baselineOutputs=new Map(fixtures.map(f => [f.input.id,mine(f.input,baselineSubmission)]));
+  const tuples:PracticeTuple[]=[];
+  const run=(role:PracticeTuple['role'],submission:Submission)=>new Map(fixtures.map(f=>{
+    const findings=mine(f.input,submission);
+    if(capture)tuples.push({role,executionIdentity:executionIdentity(submission),caseId:f.input.id,trialIndex:0,paths:[...new Set(findings.map(x=>x.path))].sort()});
+    return [f.input.id,findings];
+  }));
+  const baselineOutputs=run('baseline',baselineSubmission);
   const results=[...groups.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([digest,group]) => {
     const start=performance.now(),cpu=process.cpuUsage();
-    const outputs=new Map(fixtures.map(f => [f.input.id,mine(f.input,group.submission)]));
+    const outputs=run('candidate',group.submission);
     const resources={ elapsedMs:performance.now()-start,cpuMicroseconds:process.cpuUsage(cpu),processRssBytes:process.memoryUsage.rss() };
     return { digest,participants:group.participants.sort(),comparison:compare(fixtures,baselineOutputs,outputs),resources };
   });
@@ -40,6 +47,7 @@ export async function evaluateCohort(seed: string,pairs: number,candidates: Cand
   }
   const comparisonId=createHash('sha256').update(JSON.stringify({ generator:'sentinel-corpus/v1',seed,pairs,
     baseline:baselineDigest,candidates:results.map(r=>r.digest) })).digest('hex');
+  capture?.(tuples);
   return { schema:'sentinel-practice-cohort/v1',comparisonId,generator:'sentinel-corpus/v1',seed,pairs,
     cases:fixtures.length,tiers,results,weights:null,rewards:null,
     limitation:'Public-template practice. Participant labels are not authenticated hotkeys. Pareto tiers are not calibrated incentives or network weights.' };

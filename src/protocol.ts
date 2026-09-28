@@ -6,6 +6,7 @@ import { cryptoWaitReady,decodeAddress,encodeAddress,sr25519Verify } from '@polk
 import { admit,executionIdentity,reference,type Submission } from './competition';
 import { corpus } from './corpus';
 import { verifyChainAdmission,chainCanonical,chainFresh,type ChainAdmission,type ChainPolicy,type ChainApproval } from './chain-admission';
+import type {PracticeTuple} from './validator';
 
 export type Challenge={schema:'sentinel-challenge/v1';genesis:string;netuid:number;round:string;validator:string;miner:string;nonce:string;issuedAt:number;expiresAt:number};
 export type SignedChallenge={challenge:Challenge;signature:string};
@@ -77,7 +78,7 @@ function artifact(bytes:Uint8Array):Submission{
 
 export type SnapshotExpectation={cohortSha256:string;scope:Scope;eligible:string[];chain?:{policy:ChainPolicy;approval:ChainApproval}};
 export const snapshotByteLimit=8*1024*1024; // Wire ceiling, not a deployment capacity objective.
-export async function evaluateSnapshot(bytes:Uint8Array,expected:SnapshotExpectation){
+export async function validateSnapshot(bytes:Uint8Array,expected:SnapshotExpectation){
   if(!(bytes instanceof Uint8Array) || bytes.length>snapshotByteLimit)throw new Error('Snapshot byte limit');
   if(!exact(expected,['cohortSha256','scope','eligible',...(Object.hasOwn(expected,'chain')?['chain']:[])]) || typeof expected.cohortSha256!=='string' || !hex.test(expected.cohortSha256) ||
     !exact(expected.scope,['genesis','netuid','round','validator']) || !Array.isArray(expected.eligible) || expected.eligible.length<1 || expected.eligible.length>10000 ||
@@ -120,8 +121,12 @@ export async function evaluateSnapshot(bytes:Uint8Array,expected:SnapshotExpecta
     signature(admissionPayload(c,contribution.artifactSha256 as string,contribution.signature as string,proof.acceptedAt),proof.receiptSignature,c.validator);
     miners.add(c.miner);nonces.add(c.nonce);
   }
+  return {f,expectations,baseline};
+}
+export async function evaluateSnapshot(bytes:Uint8Array,expected:SnapshotExpectation,capture?:(tuples:PracticeTuple[])=>void){
+  const {f,expectations,baseline}=await validateSnapshot(bytes,expected);
   const {evaluateCohort}=await import('./validator');
-  const report=await evaluateCohort(f.seed,f.pairs,f.contributions.map(c=>({participant:c.miner,submission:c.submission})),baseline);
+  const report=await evaluateCohort(f.seed,f.pairs,f.contributions.map(c=>({participant:c.miner,submission:c.submission})),baseline,capture);
   return {...report,cohortSha256:expectations.cohortSha256,closedAt:f.closedAt,commitment:f.contract,reveal:{seed:f.seed,salt:f.salt},
     authentication:{scheme:'sr25519',scope:expectations.scope,eligibility:expectations.chain?'operator-approved-rpc-observed-registration':'legacy-operator-supplied-hotkey-list',...(expectations.chain?{chain:expectations.chain,evidenceUse:'historical-replay',currentEligibility:'not-assessed',revocationStatus:'not-assessed'}: {})},
     limitation:'Signed public-template practice. Chain evidence, when required, is operator-approved RPC observation, not independent finality or economic eligibility. Validator independence and hidden generalization unqualified. No weights or rewards.'};
