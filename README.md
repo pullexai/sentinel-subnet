@@ -53,6 +53,8 @@ An explicitly selected `sentinel-quorum-policy/v2` additionally pins a maximum f
 
 [HOLDOUT.md](HOLDOUT.md) adds `bun run holdout`: an independent owner signs a salted holdout-bank commitment before intake; miners verify it; validators open the bank after closure, reject public-template overlap/leakage and lying oracles, and emit a reproducible holdout ranking with a `memorizationSuspect` flag. `bun run check`: **16 tests / 1,150 assertions**. Owner/coordinator clocks are unwitnessed and owner independence is a governance assumption.
 
+[ENGINE-JOURNAL.md](ENGINE-JOURNAL.md) adds the local EC-08/09/10 part: a per-validator hash-chained, signed, append-only evaluation journal with durable bounded leases, offline verification (`bun run engine:journal verify`), fork detection by checkpoints, beacon-bound trial seeds, role-bound `sentinel-engine-attestation/v1`, exact rational losses/roster aggregation/disagreement gates and exact-vector clone classes. Beacon, witnesses, quorum exchange, chain state and unset policy values stay `policy_unresolved`/`unverified`. `bun run check`: **34 tests / 1,452 assertions**.
+
 [ENGINE-INTAKE.md](ENGINE-INTAKE.md) adds `bun run engine:intake serve|work CONFIG`: the local EC-03 part. Loopback-only bounded HTTP intake, EC-02 check order, durable SQLite receipts/nonces/quotas/leased queue, a pinned-address origin fetcher that verifies length and SHA-256 before sealing, and evaluation in a bubblewrap sandbox that never sees the holdout. Signed deterministic receipts. Finalized registration, btauth, signed policy, independent operators and execution-profile qualification are reported as `unverified`. `bun run check`: **25 tests / 1,329 assertions**.
 
 ### Authenticated contribution increment

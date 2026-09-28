@@ -19,7 +19,8 @@
     "validator:attest": "bun src/validator-attest.ts",
     "validator:transcript": "bun src/validator-transcript.ts",
     "holdout": "bun src/holdout.ts",
-    "engine:intake": "bun src/engine-intake.ts"
+    "engine:intake": "bun src/engine-intake.ts",
+    "engine:journal": "bun src/engine-journal.ts"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",
