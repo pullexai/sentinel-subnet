@@ -5,7 +5,7 @@ import {mkdtemp,writeFile,rm,readFile} from 'node:fs/promises';
 import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {contributionMediaType,contributionSigningBytes,envelopeBytes,contributionId,type ContributionPayload} from '../src/engine-contribution';
-import {EngineStore,runSandbox,unverifiedChecks,type IntakeConfig} from '../src/engine-intake';
+import {EngineStore,baselineProfile,runSandbox,unverifiedChecks,type IntakeConfig} from '../src/engine-intake';
 import {holdoutBankDigest,holdoutCommitmentPayload,type HoldoutBank,type HoldoutCase} from '../src/holdout';
 import {jcsBytes} from '../src/jcs';
 
@@ -52,6 +52,7 @@ async function setup(){
     p.artifact.files=Object.entries(files).sort(([a],[b])=>a<b?-1:1).map(([path,text])=>({path,sha256:sha(text),bytes:String(Buffer.byteLength(text)),media_type:'application/json',role:path==='LICENSE'?'license':'entrypoint'}));
     p.artifact.entrypoint='rules.json';p.provenance.license_files=['LICENSE'];p.provenance.source_revisions=[];
     p.origins=p.artifact.files.map((f:any)=>({origin_id:'local',immutable_revision:'0'.repeat(40),file_path:f.path,artifact_path:f.path}));
+    p.format.id='retrieval-profile/v1';p.lane='retrieval';
     extra(p);p.artifact.files_sha256=sha(jcsBytes(p.artifact.files));return p;
   };
   const envelope=(p:ContributionPayload)=>envelopeBytes(p,Buffer.from(sr25519Sign(contributionSigningBytes(p),miner)).toString('hex'));
@@ -81,7 +82,8 @@ const post=(base:string,body:Uint8Array|string,type=contributionMediaType)=>fetc
 
 test('intake, fetch, sandboxed evaluation and signed receipts across separate processes and restarts',async()=>{
   const s=await setup();
-  const good={'LICENSE':'MIT\n','rules.json':JSON.stringify({schema:'sentinel-literal-miner/v1',rules:[{id:'mod-sign',literal:'= i % n;'},{id:'range-edge',literal:'i < hi;'}]})};
+  const profile=structuredClone(baselineProfile);profile.stages[0].params.query_source='changed_files';
+  const good={'LICENSE':'MIT\n','rules.json':JSON.stringify(profile)};
   s.put(good);s.put({'bad-hash.json':'x'});
   const config=await s.writeConfig();
   let server=await startServer(config);
@@ -93,7 +95,7 @@ test('intake, fetch, sandboxed evaluation and signed receipts across separate pr
     // Rejections before any state change.
     expect((await post(server.base,e1,'application/json')).status).toBe(415);
     expect((await post(server.base,'{"payload":{}}')).status).toBe(400);
-    expect((await post(server.base,Buffer.from(e1.toString().replace('"lane":"detection"','"lane":"fix"')))).status).toBe(400); // signature no longer verifies
+    expect((await post(server.base,Buffer.from(e1.toString().replace('"lane":"retrieval"','"lane":"fix"')))).status).toBe(400); // signature no longer verifies
     expect((await post(server.base,'x'.repeat(256*1024+1))).status).toBe(413);
     const slow=await Bun.connect({hostname:'127.0.0.1',port:Number(new URL(server.base).port),socket:{data(sock,d){(slow as any).got=(((slow as any).got) ?? '')+d.toString();},open(){}}});
     slow.write(`POST /engine/v1/contributions HTTP/1.1\r\nHost: x\r\nContent-Type: ${contributionMediaType}\r\nContent-Length: 1000\r\n\r\n{`);
@@ -112,6 +114,13 @@ test('intake, fetch, sandboxed evaluation and signed receipts across separate pr
     expect((await post(server.base,s.envelope(redirect))).status).toBe(202);
     const timeout=s.payload({'LICENSE':'MIT\n','rules.json':'t'},'6',p=>{p.origins[1].file_path='slow.json';});
     expect((await post(server.base,s.envelope(timeout))).status).toBe(202);
+    // Formats that need an unqualified external engine are rejected without fetching; embedding stages likewise.
+    const structural=s.payload({'LICENSE':'MIT\n','rules.json':'{}'},'9',p=>{p.format.id='structural-rule/v1';p.lane='detection';});
+    expect((await post(server.base,s.envelope(structural))).status).toBe(202);
+    const embedding={'LICENSE':'MIT\n','rules.json':JSON.stringify({...profile,embedding_component_sha256:'9'.repeat(64)})};s.put({'embed.json':embedding['rules.json']});
+    const embed=s.payload(embedding,'10',p=>{p.origins[1].file_path='embed.json';});expect((await post(server.base,s.envelope(embed))).status).toBe(202);
+    const hostile={'LICENSE':'MIT\n','rules.json':JSON.stringify({...profile,stages:[{operator:'exec',params:{cmd:'cat /etc/passwd'}}]})};s.put({'hostile.json':hostile['rules.json']});
+    const host=s.payload(hostile,'11',p=>{p.origins[1].file_path='hostile.json';});expect((await post(server.base,s.envelope(host))).status).toBe(202);
 
     // Restart the intake process: durable receipt bytes survive.
     server.child.kill();await server.child.exited;server=await startServer(config);
@@ -124,12 +133,18 @@ test('intake, fetch, sandboxed evaluation and signed receipts across separate pr
     expect(reason(bad)).toMatchObject({state:'rejected',reason:'artifact_hash_mismatch'});
     expect(reason(redirect)).toMatchObject({state:'rejected',reason:'origin_status_302'});
     expect(reason(timeout)).toMatchObject({state:'rejected',reason:'artifact_fetch_timeout'});
+    expect(reason(structural)).toMatchObject({state:'rejected',reason:'unqualified-engine'});
+    expect(reason(embed)).toMatchObject({state:'rejected',reason:'unqualified-engine'});
+    expect(reason(host)).toMatchObject({state:'rejected',reason:'artifact_invalid'});
     const final=JSON.parse(await (await fetch(`${server.base}/engine/v1/receipts/${id1}`)).text());
     expect(final.payload.state).toBe('admitted');expect(JSON.stringify(final)).not.toContain('tp');
     // Evaluation report stays with the operator; deterministic given the sealed inputs.
     const {Database}=await import('bun:sqlite');const db=new Database(s.config.db,{readonly:true});
     const report=JSON.parse((db.query('SELECT report FROM engine_evaluations WHERE contribution_id=?').get(id1) as {report:string}).report);db.close();
-    expect(report.result).toBe('scored');expect(report.holdout.candidate).toMatchObject({tp:4,fp:0,fn:0});expect(report.weights).toBeNull();
+    expect(report).toMatchObject({result:'scored',input_schema:'sentinel-engine-case/v1',format:'retrieval-profile/v1',weights:null});
+    // Changed-file query retrieves the oracle-proven defect span in every defective case; the query-text baseline in half.
+    expect(report.holdout.candidate).toMatchObject({required:4,covered:4,missed:0,evidence_recall:{numerator:'4',denominator:'4'}});
+    expect(report.holdout.baseline).toMatchObject({required:4,covered:2,missed:2,ranges:4,evidence_recall:{numerator:'2',denominator:'4'}});expect(report.holdout.regressed).toBe(0);
     expect(await work(config)).toEqual([]); // Nothing re-evaluated.
     expect((await fetch(`${server.base}/engine/v1/windows/w-2026-10/replay`)).status).toBe(200);
   }finally{server.child.kill();await server.child.exited;await s.cleanup();}

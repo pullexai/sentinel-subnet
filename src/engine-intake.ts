@@ -8,7 +8,8 @@ import https from 'node:https';
 import {BlockList,isIP} from 'node:net';
 import {dirname,join} from 'node:path';
 import {ContributionNonceLedger,checkBinding,contributionMediaType,contributionByteLimit,verifyEnvelopeSignature,type ContributionExpectation,type ContributionPayload} from './engine-contribution';
-import {admit,compare,mine,reference,type Finding} from './competition';
+import {caseFromPractice} from './engine-case';
+import {Unqualified,registry,requiredEvidence,runProfile,scoreRetrieval,validateOutput,validateProfile,type RetrievalGold} from './engine-retrieval';
 import {proveFixture,type Fixture} from './corpus';
 import {admitHoldoutBank,parseHoldoutJSON,verifyHoldoutCommitment,holdoutByteLimit,type HoldoutCommitment} from './holdout';
 import {jcs,jcsBytes} from './jcs';
@@ -196,33 +197,65 @@ export async function runSandbox(o:{appDir:string;script:string;args:string[];ar
   return Buffer.concat(chunks).toString('utf8');
 }
 
-// ---- Worker: trusted process holding the sealed holdout; the artifact sees only case inputs on stdin.
+// ---- Worker: trusted process holding the sealed holdout; the artifact sees only `sentinel-engine-case/v1` bundles on stdin.
+// Formats whose EC-04/06/07 adapters need an unqualified external engine or model are rejected, never simulated.
+export const unqualifiedFormats:Record<string,string>={
+  'structural-rule/v1':'needs a qualified ast-grep engine/grammar build (EC-04)',
+  'taint-rule/v1':'needs a qualified Opengrep analysis profile (EC-04)',
+  'tensor-model/v1':'needs a qualified model runtime and architecture ABI (EC-06)',
+  'lora-adapter/v1':'needs a qualified base model and PEFT runtime (EC-06)',
+  'fix-template/v1':'needs a qualified structural matcher and challenge-fix-test/v1 profile (EC-07)',
+};
+export const caseQuery='Locate the code regions most relevant to reviewing the changed files for defects.';
 export async function loadHoldout(config:IntakeConfig){
   const h=config.holdout!,commitment=await verifyHoldoutCommitment(h.commitment,h.round,h.owner);
-  // Lineage separation: admitHoldoutBank rejects lineages spanning families, public-template families and missing polarity.
+  // Lineage separation: admitHoldoutBank rejects lineages that span families, public-template families and missing polarity.
   const bank=admitHoldoutBank(parseHoldoutJSON(await boundedFile(h.bank_path,holdoutByteLimit,true)),commitment,[]);
   const fixtures=structuredClone(bank.cases) as unknown as Fixture[];
   for(const f of fixtures)await proveFixture(f);
-  return {fixtures,bankSha256:commitment.bankSha256};
+  // Engine cases are derived with the bank salt, so file IDs and family commitments are unlinkable to public data.
+  const cases=bank.cases.map(c=>{
+    const {bundle,fileId}=caseFromPractice(c.input,bank.salt,c.lineage,'retrieval',caseQuery);
+    const evidence=c.buggy?{file_id:fileId(c.defectPath),...requiredEvidence(c.input.files[c.defectPath],c.fixedFiles[c.defectPath])}:null;
+    return {bundle,gold:{case_input_id:bundle.case.case_input_id,evidence} as RetrievalGold};
+  });
+  return {fixtures,cases,bankSha256:commitment.bankSha256};
 }
+export const baselineProfile={schema:'retrieval-profile/v1',chunker_component_sha256:registry.chunker.id,index_schema_sha256:registry.index.id,embedding_component_sha256:null,
+  stages:[{operator:'lexical_bm25',params:{query_source:'query_text',k1:{numerator:'6',denominator:'5'},b:{numerator:'3',denominator:'4'},top_k:'8'}},{operator:'pack_context',params:{max_ranges:'4'}}],
+  output_limit_ref:registry.output_limit.id};
 export async function processOne(store:EngineStore,holdout:Awaited<ReturnType<typeof loadHoldout>>,now=Date.now()){
   const lease=store.lease(now);if(!lease)return null;
   const c=store.config,p=store.payload(lease.id),dir=join(c.sealed_dir,lease.id);
+  const base={schema:'sentinel-engine-evaluation/v1',contribution_id:lease.id,format:p.format.id,files_sha256:p.artifact.files_sha256,holdout_bank_sha256:holdout.bankSha256,
+    input_schema:'sentinel-engine-case/v1',isolation:'bwrap-local-unqualified',weights:null,rewards:null,unverified:[...unverifiedChecks]};
+  if(Object.hasOwn(unqualifiedFormats,p.format.id)){
+    // Nothing is fetched or executed: the attempt is recorded with an explicit, rank-independent reason.
+    const reason='unqualified-engine';
+    store.complete(lease,'rejected',reason,{...base,result:reason,detail:unqualifiedFormats[p.format.id],holdout:null});
+    return {id:lease.id,state:'rejected',reason};
+  }
   try{await fetchAndSeal(p,c,dir);await verifySealed(p,dir);}
   catch(x){const reason=(x as {reason?:string}).reason;if(!reason)throw x;store.complete(lease,'rejected',reason,null);return {id:lease.id,state:'rejected',reason};}
-  const inputs=holdout.fixtures.map(f=>f.input);
+  // Pure-data admission in the trusted worker (bounded parser, no execution) so rejection reasons are exact.
+  try{validateProfile(await readFile(join(dir,p.artifact.entrypoint)));}
+  catch(x){const reason=x instanceof Unqualified?x.reason:'artifact_invalid';store.complete(lease,'rejected',reason,{...base,result:reason,detail:x instanceof Error?x.message:null,holdout:null});return {id:lease.id,state:'rejected',reason};}
+  const stdin=Buffer.from(JSON.stringify(holdout.cases.map(x=>x.bundle)));
   let report:object;
   try{
-    const out=JSON.parse(await runSandbox({appDir:import.meta.dir,script:'engine-sandbox.ts',args:[p.artifact.entrypoint],artifactDir:dir,stdin:Buffer.from(JSON.stringify(inputs)),timeoutMs:c.limits!.sandbox_timeout_ms,maxOutput:c.limits!.sandbox_output_bytes}));
-    if(!out || typeof out!=='object' || Array.isArray(out))fail('sandbox_output_invalid');
-    const candidate=new Map<string,Finding[]>(inputs.map(i=>[i.id,Object.hasOwn(out,i.id)?out[i.id]:[]]));
-    const baseline=new Map(inputs.map(i=>[i.id,mine(structuredClone(i),admit(reference))]));
-    report={schema:'sentinel-engine-evaluation/v1',contribution_id:lease.id,files_sha256:p.artifact.files_sha256,holdout_bank_sha256:holdout.bankSha256,
-      isolation:'bwrap-local-unqualified',result:'scored',holdout:compare(holdout.fixtures,baseline,candidate),weights:null,rewards:null,unverified:[...unverifiedChecks]};
+    const out=JSON.parse(await runSandbox({appDir:import.meta.dir,script:'engine-sandbox.ts',args:[p.format.id,p.artifact.entrypoint],artifactDir:dir,stdin,timeoutMs:c.limits!.sandbox_timeout_ms,maxOutput:c.limits!.sandbox_output_bytes}));
+    if(!Array.isArray(out) || out.length!==holdout.cases.length)fail('sandbox_output_invalid');
+    // Trusted re-validation of every range against the verified file table; the adapter's word counts for nothing.
+    const candidate=new Map(holdout.cases.map((x,i)=>[x.gold.case_input_id,validateOutput(out[i],x.gold.case_input_id,x.bundle.file_table)]));
+    const reference=validateProfile(Buffer.from(JSON.stringify(baselineProfile)));
+    const baseline=new Map(holdout.cases.map(x=>[x.gold.case_input_id,runProfile(reference,x.bundle)]));
+    const gold=holdout.cases.map(x=>x.gold),b=scoreRetrieval(gold,baseline),k=scoreRetrieval(gold,candidate);
+    const regressed=gold.filter(g=>b.hits.get(g.case_input_id) && !k.hits.get(g.case_input_id)).length;
+    const strip=({hits,...rest}:typeof b)=>rest;
+    report={...base,result:'scored',holdout:{baseline:strip(b),candidate:strip(k),regressed}};
   }catch(x){
     // Hostile or broken artifacts consume their reserved attempt; no retry, no score.
-    report={schema:'sentinel-engine-evaluation/v1',contribution_id:lease.id,files_sha256:p.artifact.files_sha256,holdout_bank_sha256:holdout.bankSha256,
-      isolation:'bwrap-local-unqualified',result:(x as {reason?:string}).reason ?? 'sandbox_output_invalid',holdout:null,weights:null,rewards:null,unverified:[...unverifiedChecks]};
+    report={...base,result:(x as {reason?:string}).reason ?? 'sandbox_output_invalid',holdout:null};
   }
   store.complete(lease,'admitted',null,report);
   return {id:lease.id,state:'admitted',report};
