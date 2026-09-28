@@ -4,6 +4,18 @@ import { admit,compare,executionIdentity,mine,reference,type Submission } from '
 
 export type Candidate = { participant:string; submission:Submission };
 export type PracticeTuple = {role:'baseline'|'candidate';executionIdentity:string;caseId:string;trialIndex:0;paths:string[]};
+// Pareto tiers avoid inventing utility weights: more TP, fewer FP, fewer lost
+// baseline detections. Resource observations are reported, not noisy tie-breaks.
+export function paretoTiers(results:{digest:string;tp:number;fp:number;regressed:number}[]) {
+  const remaining=new Set(results.map(r => r.digest)),tiers:string[][]=[];
+  const dominates=(x:typeof results[number],y:typeof results[number]) =>
+    x.tp>=y.tp && x.fp<=y.fp && x.regressed<=y.regressed && (x.tp>y.tp || x.fp<y.fp || x.regressed<y.regressed);
+  while (remaining.size) {
+    const tier=results.filter(r => remaining.has(r.digest) && !results.some(other => remaining.has(other.digest) && dominates(other,r))).map(r => r.digest);
+    tiers.push(tier); for (const id of tier) remaining.delete(id);
+  }
+  return tiers;
+}
 const participant = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 export async function evaluateCohort(seed: string,pairs: number,candidates: Candidate[],baseline: Submission=reference,capture?:(tuples:PracticeTuple[])=>void) {
   if (!Array.isArray(candidates) || candidates.length<1 || candidates.length>100 ||
@@ -33,18 +45,7 @@ export async function evaluateCohort(seed: string,pairs: number,candidates: Cand
     const resources={ elapsedMs:performance.now()-start,cpuMicroseconds:process.cpuUsage(cpu),processRssBytes:process.memoryUsage.rss() };
     return { digest,participants:group.participants.sort(),comparison:compare(fixtures,baselineOutputs,outputs),resources };
   });
-  // Pareto tiers avoid inventing utility weights: more TP, fewer FP, fewer lost
-  // baseline detections. Resource observations are reported, not noisy tie-breaks.
-  const remaining=new Set(results.map(r => r.digest)),tiers:string[][]=[];
-  const dominates=(a:typeof results[number],b:typeof results[number]) => {
-    const x=a.comparison,y=b.comparison;
-    return x.candidate.tp>=y.candidate.tp && x.candidate.fp<=y.candidate.fp && x.regressed<=y.regressed &&
-      (x.candidate.tp>y.candidate.tp || x.candidate.fp<y.candidate.fp || x.regressed<y.regressed);
-  };
-  while (remaining.size) {
-    const tier=results.filter(r => remaining.has(r.digest) && !results.some(other => remaining.has(other.digest) && dominates(other,r))).map(r => r.digest);
-    tiers.push(tier); for (const id of tier) remaining.delete(id);
-  }
+  const tiers=paretoTiers(results.map(r=>({digest:r.digest,tp:r.comparison.candidate.tp,fp:r.comparison.candidate.fp,regressed:r.comparison.regressed})));
   const comparisonId=createHash('sha256').update(JSON.stringify({ generator:'sentinel-corpus/v1',seed,pairs,
     baseline:baselineDigest,candidates:results.map(r=>r.digest) })).digest('hex');
   capture?.(tuples);

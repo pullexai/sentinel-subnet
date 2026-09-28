@@ -17,7 +17,8 @@
     "validator:practice": "bun src/validator.ts",
     "validator:replay": "bun src/replay.ts",
     "validator:attest": "bun src/validator-attest.ts",
-    "validator:transcript": "bun src/validator-transcript.ts"
+    "validator:transcript": "bun src/validator-transcript.ts",
+    "holdout": "bun src/holdout.ts"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",

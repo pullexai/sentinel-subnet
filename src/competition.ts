@@ -41,7 +41,7 @@ export function measure(fixtures: Fixture[],outputs: ReadonlyMap<string,readonly
     // One defect per fixture. Repeating its location never multiplies reward.
     const paths = new Set(findings.map(f => f.path));
     const hit = fixture.buggy && paths.has(fixture.defectPath);
-    for (const counts of [total,byFamily[fixture.family]]) {
+    for (const counts of [total,byFamily[fixture.family] ??= empty()]) {
       counts.tp+=Number(hit); counts.fn+=Number(fixture.buggy && !hit); counts.fp+=paths.size-Number(hit);
       counts.clean+=Number(!fixture.buggy); counts.cleanFlagged+=Number(!fixture.buggy && paths.size>0);
     }
