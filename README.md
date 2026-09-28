@@ -31,6 +31,8 @@ Reports include TP/FP/FN, clean-case false positives, precision/recall, per-fami
 
 Evaluation copies admitted candidate and baseline data before asynchronous oracle execution. Mutating a caller-owned rule array while those oracles run cannot change the bytes scored under an earlier execution digest. `tests/competition.test.ts` exercises this for cohort and single-submission evaluation. This fixes local input consistency; it does not add semantic-clone or network consensus protection.
 
+Signed admission and replay also seal inputs before crypto awaits. Snapshot evaluation carries its validated baseline through scoring; the shipped family inventory is immutable. Exact-JSON boundaries reject BOMs rather than stripping them, and stored snapshots cannot be normalized during export. `bun run check` passes **14 tests / 733 assertions** on Bun 1.4.2, including actual miner, replay and attestation CLI processes, malformed later-cohort entries, empty signing journals after rejection and process-restart conflict recovery. These remain public-template checks with local practice keys, not hidden evaluation or independent operators.
+
 ## Required before network readiness
 
 [chain/README.md](chain/README.md) documents the optional pinned official-SDK read-only observer and `ContributionInbox.chainQualified` admission. It binds separately approved finalized observations, registrations and subnet incarnation; portable snapshot v3 retains that evidence and requires independent replay expectations. Actual local runtime-424 reads passed. Operator-trusted RPC observation is not independent finality, economic eligibility, transport qualification or network activation.

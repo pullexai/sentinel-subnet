@@ -20,6 +20,15 @@ test('sr25519 challenge binding, durable idempotent acceptance and authenticated
     const c=inbox.issue(address);expect(inbox.issue(address)).toEqual(c);
     const signed={challenge:c,signature:Buffer.from(sr25519Sign(challengePayload(c),validator)).toString('hex')};
     expect(await verifyChallenge(signed,scope,address,now,100)).toEqual(c);
+    const callerChallenge=structuredClone(signed),callerScope={...scope};
+    const checking=verifyChallenge(callerChallenge,callerScope,address,now,100);
+    callerChallenge.challenge.netuid++;callerChallenge.signature='0'.repeat(128);callerScope.netuid++;
+    expect(await checking).toEqual(c);
+    const returned=await verifyChallenge(signed,scope,address,now,100);
+    expect(returned).not.toBe(signed.challenge);
+    const nonce=signed.challenge.nonce;returned.nonce='0'.repeat(64);expect(signed.challenge.nonce).toBe(nonce);
+    const invalidChallenge={...signed,signature:'0'.repeat(128)},invalidChecking=verifyChallenge(invalidChallenge,scope,address,now,100);
+    invalidChallenge.signature=signed.signature;await expect(invalidChecking).rejects.toThrow('signature');
     for(const changed of [{...scope,netuid:8},{...scope,genesis:'c'.repeat(64)},{...scope,round:'c'.repeat(64)},{...scope,validator:otherAddress}])await expect(verifyChallenge(signed,changed,address,now,100)).rejects.toThrow();
     await expect(verifyChallenge(signed,scope,otherAddress,now,100)).rejects.toThrow();
     for(const time of [999,1100])await expect(verifyChallenge(signed,scope,address,time,100)).rejects.toThrow();
@@ -32,11 +41,20 @@ test('sr25519 challenge binding, durable idempotent acceptance and authenticated
     for(const changed of [{...c,nonce:'c'.repeat(64)},{...c,round:'c'.repeat(64)},{...c,expiresAt:1200}]){
       await expect(inbox.accept({...envelope,challenge:changed,signature:Buffer.from(sr25519Sign(contributionPayload(changed,digest),miner)).toString('hex')},bytes)).rejects.toThrow();
     }
-    const malformed=Buffer.from('{"schema":"sentinel-literal-miner/v1","schema":"sentinel-literal-miner/v1","rules":[{"id":"aa","literal":"x"}]}');
-    await expect(inbox.accept({...envelope,artifactSha256:sha256(malformed),signature:Buffer.from(sr25519Sign(contributionPayload(c,sha256(malformed)),miner)).toString('hex')},malformed)).rejects.toThrow('Noncanonical');
+    for(const malformed of [Buffer.from('{"schema":"sentinel-literal-miner/v1","schema":"sentinel-literal-miner/v1","rules":[{"id":"aa","literal":"x"}]}'),Buffer.concat([Buffer.from([0xef,0xbb,0xbf]),bytes]),Buffer.concat([bytes,Buffer.from('\n')])]){
+      await expect(inbox.accept({...envelope,artifactSha256:sha256(malformed),signature:Buffer.from(sr25519Sign(contributionPayload(c,sha256(malformed)),miner)).toString('hex')},malformed)).rejects.toThrow();
+      expect(inbox.candidates()).toEqual([]);
+    }
+    const invalidEnvelope={...envelope,signature:'0'.repeat(128)},invalidAcceptance=inbox.accept(invalidEnvelope,bytes);
+    invalidEnvelope.signature=envelope.signature;
+    await expect(invalidAcceptance).rejects.toThrow('signature');expect(inbox.candidates()).toEqual([]);
     const peer=new ContributionInbox(directory,scope,[address],100,()=>now);
     const expectedReceipt={hotkey:address,artifactSha256:digest};
-    try{expect(await Promise.all([inbox.accept(envelope,bytes),peer.accept(envelope,bytes)])).toEqual([expectedReceipt,expectedReceipt]);}finally{peer.close();}
+    try{
+      const callerEnvelope=structuredClone(envelope),callerBytes=Buffer.from(bytes),accepting=inbox.accept(callerEnvelope,callerBytes);
+      callerEnvelope.challenge.netuid++;callerEnvelope.signature='0'.repeat(128);callerEnvelope.artifactSha256='0'.repeat(64);callerBytes.fill(0);
+      expect(await Promise.all([accepting,peer.accept(envelope,bytes)])).toEqual([expectedReceipt,expectedReceipt]);
+    }finally{peer.close();}
     inbox.close();inbox=new ContributionInbox(directory,scope,[address,otherAddress],100,()=>now);
     expect(await inbox.accept(envelope,bytes)).toEqual(expectedReceipt);
     const different=Buffer.from(JSON.stringify({schema:'sentinel-literal-miner/v1',rules:[{id:'changed',literal:'other'}]}));

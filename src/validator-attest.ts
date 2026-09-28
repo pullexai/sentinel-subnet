@@ -10,7 +10,7 @@ if(import.meta.main){
     const [snapshot,expectations,policyPath,validator,keyPath,directory,...extra]=process.argv.slice(2);
     if(!snapshot || !expectations || !policyPath || !validator || !keyPath || !directory || extra.length)throw new Error('Usage: validator-attest.ts SNAPSHOT EXPECTATIONS POLICY VALIDATOR PRIVATE_SEED JOURNAL_DIRECTORY');
     const json=async(path:string)=>{
-      const text=new TextDecoder('utf-8',{fatal:true}).decode(await boundedFile(path,1024*1024)),value=JSON.parse(text);
+      const text=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(await boundedFile(path,1024*1024)),value=JSON.parse(text);
       if(JSON.stringify(value)!==text)throw new Error('Compact canonical JSON required');return value;
     };
     const expected=await json(expectations) as SnapshotExpectation,policy=await json(policyPath) as QuorumPolicy;

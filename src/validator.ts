@@ -4,7 +4,7 @@ import { admit,compare,executionIdentity,mine,reference,type Submission } from '
 
 export type Candidate = { participant:string; submission:Submission };
 const participant = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
-export async function evaluateCohort(seed: string,pairs: number,candidates: Candidate[]) {
+export async function evaluateCohort(seed: string,pairs: number,candidates: Candidate[],baseline: Submission=reference) {
   if (!Array.isArray(candidates) || candidates.length<1 || candidates.length>100 ||
     candidates.some(c => !c || Object.keys(c).sort().join(',')!=='participant,submission' || typeof c.participant!=='string' || !participant.test(c.participant)) ||
     new Set(candidates.map(c => c.participant)).size!==candidates.length) throw new Error('Invalid practice cohort');
@@ -16,15 +16,15 @@ export async function evaluateCohort(seed: string,pairs: number,candidates: Cand
     if (group) group.participants.push(c.participant);
     else groups.set(digest,{ submission,participants:[c.participant] });
   }
-  const baselineSubmission=structuredClone(admit(reference)),baselineDigest=executionIdentity(baselineSubmission);
+  const baselineSubmission=structuredClone(admit(baseline)),baselineDigest=executionIdentity(baselineSubmission);
   const fixtures=corpus(seed,pairs);
   for (const fixture of fixtures) await proveFixture(fixture);
-  const baseline=new Map(fixtures.map(f => [f.input.id,mine(f.input,baselineSubmission)]));
+  const baselineOutputs=new Map(fixtures.map(f => [f.input.id,mine(f.input,baselineSubmission)]));
   const results=[...groups.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([digest,group]) => {
     const start=performance.now(),cpu=process.cpuUsage();
     const outputs=new Map(fixtures.map(f => [f.input.id,mine(f.input,group.submission)]));
     const resources={ elapsedMs:performance.now()-start,cpuMicroseconds:process.cpuUsage(cpu),processRssBytes:process.memoryUsage.rss() };
-    return { digest,participants:group.participants.sort(),comparison:compare(fixtures,baseline,outputs),resources };
+    return { digest,participants:group.participants.sort(),comparison:compare(fixtures,baselineOutputs,outputs),resources };
   });
   // Pareto tiers avoid inventing utility weights: more TP, fewer FP, fewer lost
   // baseline detections. Resource observations are reported, not noisy tie-breaks.

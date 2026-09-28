@@ -5,6 +5,7 @@ import { evaluateCohort } from '../src/validator';
 import { parseInput } from '../src/miner';
 
 test('four independently synthetic practice families demonstrate bugs, fixes and clean controls',async () => {
+  expect(()=>{(families as unknown as string[]).pop();}).toThrow();
   const fixtures = corpus('a'.repeat(64),2);
   expect(corpus('a'.repeat(64),2)).toEqual(fixtures);
   expect(new Set(fixtures.map(f => f.input.id)).size).toBe(16);

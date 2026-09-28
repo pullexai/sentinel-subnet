@@ -84,6 +84,15 @@ test('cohort closure freezes contract, signatures and eligibility across concurr
     const target=scoreTarget(report);expect(scoreTarget(replay)).toEqual(target);
     const exported=inbox.exportPractice(),expected={cohortSha256:closure.cohortSha256,scope,eligible:addresses};
     expect(sha256(exported)).toBe(closure.cohortSha256);
+    const callerBytes=Buffer.from(exported),callerExpected=structuredClone(expected),savedReference=structuredClone(reference);
+    const pendingReplay=evaluateSnapshot(callerBytes,callerExpected);
+    try{
+      callerBytes.fill(0);callerExpected.scope.netuid++;callerExpected.eligible.length=0;callerExpected.cohortSha256='0'.repeat(64);
+      reference.rules.splice(0,reference.rules.length,{id:'changed-baseline',literal:'absent-marker'});
+      const sealed=await pendingReplay;
+      expect(scoreTarget(sealed)).toEqual(target);
+      expect(sealed.results[0].comparison.baseline).toMatchObject({tp:4,fp:0,fn:0});
+    }finally{reference.rules=savedReference.rules;}
     await expect(evaluateSnapshot(Buffer.from('{}'),expected)).rejects.toThrow('digest');
     await expect(evaluateSnapshot(Buffer.alloc(snapshotByteLimit+1),expected)).rejects.toThrow('byte limit');
     for(const altered of [{...expected,scope:{...scope,netuid:10}},{...expected,eligible:[addresses[0]]},{...expected,extra:1}])await expect(evaluateSnapshot(exported,altered)).rejects.toThrow();
@@ -108,6 +117,8 @@ test('cohort closure freezes contract, signatures and eligibility across concurr
     await mutate(v=>v.schema='sentinel-frozen-practice/v1');
     const duplicate=Buffer.from(exported.toString().replace('{','{"schema":"sentinel-frozen-practice/v2",'));
     await expect(evaluateSnapshot(duplicate,{...expected,cohortSha256:sha256(duplicate)})).rejects.toThrow('noncanonical');
+    const bom=Buffer.concat([Buffer.from([0xef,0xbb,0xbf]),exported]);
+    await expect(evaluateSnapshot(bom,{...expected,cohortSha256:sha256(bom)})).rejects.toThrow();
     const snapshotPath=join(directory,'snapshot.json'),expectedPath=join(directory,'expected.json');
     await writeFile(snapshotPath,exported,{mode:0o600});await writeFile(expectedPath,JSON.stringify(expected),{mode:0o600});
     const child=Bun.spawn(['bun',new URL('../src/replay.ts',import.meta.url).pathname,snapshotPath,expectedPath],{cwd:'/tmp/opencode',stdout:'pipe',stderr:'pipe'});
@@ -125,6 +136,14 @@ test('cohort closure freezes contract, signatures and eligibility across concurr
     try{
       db.exec('DELETE FROM challenges');
       expect((await inbox.evaluatePractice()).cohortSha256).toBe(closure.cohortSha256);
+      // Even a matching stored hash cannot authorize normalizing ambiguous JSON on export.
+      db.query('UPDATE frozen_practice SET body=?,digest=?').run(duplicate.toString(),sha256(duplicate));
+      inbox.close();inbox=new ContributionInbox(directory,scope,addresses,1000,()=>9999);
+      expect(()=>inbox.exportPractice()).toThrow('noncanonical');
+      await expect(inbox.evaluatePractice()).rejects.toThrow('noncanonical');
+      expect(()=>inbox.closePractice('d'.repeat(64),1,salt)).toThrow('noncanonical');
+      db.query('UPDATE frozen_practice SET body=?,digest=?').run(exported.toString(),sha256(exported));
+      expect(inbox.exportPractice()).toEqual(exported);
       db.exec("UPDATE frozen_practice SET body=body||' '");
       await expect(inbox.evaluatePractice()).rejects.toThrow('integrity');
     }finally{db.close();}

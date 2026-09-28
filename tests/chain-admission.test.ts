@@ -32,6 +32,7 @@ test('operator-approved chain identity binds freshness, registrations and durabl
   }
   const text=Buffer.from(input.bytes).toString().trim();
   expect(()=>verifyChainAdmission({...input,bytes:Buffer.from(text.replace('"sha256":','"sha256":"bad","sha256":'))},1000)).toThrow();
+  expect(()=>verifyChainAdmission({...input,bytes:Buffer.concat([Buffer.from([0xef,0xbb,0xbf]),input.bytes])},1000)).toThrow();
   const dir=mkdtempSync(join(tmpdir(),'sentinel-chain-'));let now=1000;
   try{
     const legacy=new ContributionInbox(dir,scope,[key],50,()=>now);

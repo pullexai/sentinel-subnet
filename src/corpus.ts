@@ -3,7 +3,7 @@ import { mkdtemp,writeFile,rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-export const families = ['amount-unit','tenant-cache','path-boundary','expiry-boundary'] as const;
+export const families = Object.freeze(['amount-unit','tenant-cache','path-boundary','expiry-boundary'] as const);
 export type Family = typeof families[number];
 export type Input = { schema:'sentinel-practice-input/v1'; id:string; files:Record<string,string>; changedFiles:string[] };
 export type Fixture = { input:Input; family:Family; buggy:boolean; defectPath:string; fixedFiles:Record<string,string>;

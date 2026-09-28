@@ -28,7 +28,7 @@ export function verifyChainAdmission(input:ChainAdmission,now:number){
     !integer(a.observedAt) || !integer(a.maxAgeMs) || a.maxAgeMs<1 || !integer(a.finalizedHeight) || !hex(a.finalizedHash) || chainDigest(p)!==a.policySha256)throw new Error('Invalid chain approval');
   chainFresh(a,now);
   if(!(input.bytes instanceof Uint8Array) || input.bytes.length>131072)throw new Error('Chain snapshot byte limit');
-  const text=new TextDecoder('utf-8',{fatal:true}).decode(input.bytes),envelope=JSON.parse(text);
+  const text=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(input.bytes),envelope=JSON.parse(text);
   if(!exact(envelope,['sha256','observation']) || (text!==chainCanonical(envelope) && text!==chainCanonical(envelope)+'\n'))throw new Error('Noncanonical chain envelope');
   const o=envelope.observation;
   if(chainDigest(o)!==a.snapshotSha256 || envelope.sha256!==a.snapshotSha256)throw new Error('Unapproved chain snapshot');

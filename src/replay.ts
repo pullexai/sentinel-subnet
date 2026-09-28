@@ -14,7 +14,7 @@ export async function boundedFile(path:string,limit:number,privateFile=false){
 if(import.meta.main){
   const [snapshot,expectations,...extra]=process.argv.slice(2);
   if(!snapshot || !expectations || extra.length)throw new Error('Usage: replay.ts <snapshot.json> <trusted-expectations.json>');
-  const text=new TextDecoder('utf-8',{fatal:true}).decode(await boundedFile(expectations,1024*1024)),expected=JSON.parse(text);
+  const text=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(await boundedFile(expectations,1024*1024)),expected=JSON.parse(text);
   if(JSON.stringify(expected)!==text)throw new Error('Expectations require compact canonical JSON');
   const report=await evaluateSnapshot(await boundedFile(snapshot,snapshotByteLimit),expected);
   console.log(JSON.stringify({target:scoreTarget(report),report}));

@@ -5,26 +5,30 @@ import {mkdtemp,writeFile,chmod,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {Database} from 'bun:sqlite';
 import {ContributionInbox,challengePayload,contributionPayload,practiceContract,practiceRound,sha256,type Scope} from '../src/protocol';
-import {reference,type Submission} from '../src/competition';
+import {measure,reference,type Finding,type Submission} from '../src/competition';
+import {corpus} from '../src/corpus';
 import {VoteJournal} from '../src/vote-journal';
 import {verifyScoreAttestation} from '../src/attestations';
 
-test('independent local validator processes recompute, persist signing locks and refuse conflicting recovery',async()=>{
+test('separate local validator processes revalidate the complete cohort, persist signing locks and refuse conflicting recovery',async()=>{
   await cryptoWaitReady();
   const directory=await mkdtemp('/tmp/opencode/subnet-attest-');
   const seeds=[randomBytes(32),randomBytes(32)],keys=seeds.map(seed=>sr25519PairFromSeed(seed));
   const validators=keys.map(k=>encodeAddress(k.publicKey,42)),policy={validators,threshold:2};
-  const coordinator=sr25519PairFromSeed(randomBytes(32)),miner=sr25519PairFromSeed(randomBytes(32)),minerAddress=encodeAddress(miner.publicKey,42);
+  const coordinator=sr25519PairFromSeed(randomBytes(32)),miners=[sr25519PairFromSeed(randomBytes(32)),sr25519PairFromSeed(randomBytes(32))],minerAddresses=miners.map(k=>encodeAddress(k.publicKey,42));
   const seed='a'.repeat(64),salt='b'.repeat(64),contract=practiceContract(seed,salt,1);
   const scope:Scope={genesis:'c'.repeat(64),netuid:7,round:practiceRound(contract),validator:encodeAddress(coordinator.publicKey,42)};
   const fixture=async(name:string,submission:Submission)=>{
-    const inbox=new ContributionInbox(join(directory,name),scope,[minerAddress],100,()=>1000);
+    const inbox=new ContributionInbox(join(directory,name),scope,minerAddresses,100,()=>1000);
     try{
-      inbox.registerPractice(contract);const challenge=inbox.issue(minerAddress),bytes=Buffer.from(JSON.stringify(submission)),artifactSha256=sha256(bytes);
-      await inbox.accept({schema:'sentinel-contribution/v1',challenge,artifactSha256,signature:Buffer.from(sr25519Sign(contributionPayload(challenge,artifactSha256),miner)).toString('hex')},bytes);
-      await inbox.attestAdmission({challenge,signature:Buffer.from(sr25519Sign(challengePayload(challenge),coordinator)).toString('hex')},async payload=>Buffer.from(sr25519Sign(payload,coordinator)).toString('hex'));
+      inbox.registerPractice(contract);const bytes=Buffer.from(JSON.stringify(submission)),artifactSha256=sha256(bytes);
+      for(const [i,miner] of miners.entries()){
+        const challenge=inbox.issue(minerAddresses[i]);
+        await inbox.accept({schema:'sentinel-contribution/v1',challenge,artifactSha256,signature:Buffer.from(sr25519Sign(contributionPayload(challenge,artifactSha256),miner)).toString('hex')},bytes);
+        await inbox.attestAdmission({challenge,signature:Buffer.from(sr25519Sign(challengePayload(challenge),coordinator)).toString('hex')},async payload=>Buffer.from(sr25519Sign(payload,coordinator)).toString('hex'));
+      }
       inbox.closePractice(seed,1,salt);const snapshot=inbox.exportPractice();
-      return {snapshot,expected:{scope,eligible:[minerAddress],cohortSha256:sha256(snapshot)}};
+      return {snapshot,expected:{scope,eligible:minerAddresses,cohortSha256:sha256(snapshot)}};
     }finally{inbox.close();}
   };
   try{
@@ -59,13 +63,67 @@ test('independent local validator processes recompute, persist signing locks and
       }finally{db.close();}
     }finally{journal.close();}
     for(const [name,value] of [['snapshot',a.snapshot],['expectations',Buffer.from(JSON.stringify(a.expected))],['policy',Buffer.from(JSON.stringify(policy))]] as const)await writeFile(join(directory,name),value);
-    const cli=async(i:number,journalName=`validator-${i}`)=>{
-      const child=Bun.spawn([process.execPath,'src/validator-attest.ts',join(directory,'snapshot'),join(directory,'expectations'),join(directory,'policy'),validators[i],join(directory,`key-${i}`),join(directory,journalName)],{cwd:new URL('..',import.meta.url).pathname,env:{PATH:process.env.PATH},stdout:'pipe',stderr:'pipe'});
+    const run=async(args:string[],input?:string)=>{
+      const child=Bun.spawn([process.execPath,...args],{cwd:new URL('..',import.meta.url).pathname,env:{PATH:process.env.PATH},stdin:'pipe',stdout:'pipe',stderr:'pipe'});
+      if(input!==undefined)child.stdin.write(input);child.stdin.end();
       const [out,err,exit]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);return {out,err,exit};
     };
+    const cli=(i:number,journalName=`validator-${i}`)=>run(['src/validator-attest.ts',join(directory,'snapshot'),join(directory,'expectations'),join(directory,'policy'),validators[i],join(directory,`key-${i}`),join(directory,journalName)]);
+    const replay=()=>run(['src/replay.ts',join(directory,'snapshot'),join(directory,'expectations')]);
+    const setSnapshot=async(snapshot:Buffer,expected=a.expected)=>{
+      await writeFile(join(directory,'snapshot'),snapshot);await writeFile(join(directory,'expectations'),JSON.stringify(expected));
+    };
+    const modified=(change:(value:any)=>void)=>{const value=JSON.parse(a.snapshot.toString());change(value);return Buffer.from(JSON.stringify(value));};
+    const malformed=[
+      Buffer.from(a.snapshot.toString().replace('"schema":','"schema":"duplicate","schema":')),
+      Buffer.concat([Buffer.from([0xef,0xbb,0xbf]),a.snapshot]),Buffer.concat([Buffer.from([0xff]),a.snapshot]),Buffer.concat([a.snapshot,Buffer.from('\n')]),
+      modified(v=>v.contributions[1].artifactSha256='0'.repeat(64)),modified(v=>v.contributions[1].signature='0'.repeat(128)),
+      modified(v=>{const c=v.contributions[1];c.submission.rules[0].literal='tampered';c.artifactSha256=sha256(Buffer.from(JSON.stringify(c.submission)));}),
+      modified(v=>v.contributions[1].admission.challengeSignature='0'.repeat(128)),modified(v=>v.contributions[1].admission.receiptSignature='0'.repeat(128)),
+      modified(v=>v.contributions[1]=v.contributions[0]),modified(v=>v.fixtureSha256='0'.repeat(64)),modified(v=>v.extra=true),
+    ];
+    // A valid first entry cannot authorize a malformed later entry, even with an approved byte hash.
+    // No key files exist yet; invalid evidence must fail before any signing reservation.
+    for(const bytes of malformed){
+      await setSnapshot(bytes,{...a.expected,cohortSha256:sha256(bytes)});
+      for(const rejected of await Promise.all([cli(0,'rejected'),replay()])){
+        expect(rejected.exit).not.toBe(0);expect(rejected.out).toBe('');expect(rejected.err.length).toBeGreaterThan(0);expect(rejected.err).not.toContain('key-0');
+      }
+    }
+    // Omitting an admitted entry cannot keep the independently pinned complete-cohort digest.
+    await setSnapshot(modified(v=>v.contributions.pop()));
+    for(const rejected of await Promise.all([cli(0,'rejected'),replay()])){
+      expect(rejected.exit).not.toBe(0);expect(rejected.out).toBe('');expect(rejected.err).toContain('digest mismatch');
+    }
+    await setSnapshot(a.snapshot);
+    for(const name of ['expectations','policy']){
+      const text=JSON.stringify(name==='expectations'?a.expected:policy),duplicate=name==='policy'?'{"threshold":0,':'{"cohortSha256":"duplicate",';
+      for(const bytes of [Buffer.from(text.replace('{','{"unknown":true,')),Buffer.concat([Buffer.from([0xef,0xbb,0xbf]),Buffer.from(text)]),Buffer.from(text.replace('{',duplicate))]){
+        await writeFile(join(directory,name),bytes);
+        const rejected=await cli(0,'rejected');expect(rejected.exit).toBe(1);expect(rejected.out).toBe('');expect(rejected.err).not.toContain('key-0');
+        if(name==='expectations'){const refused=await replay();expect(refused.exit).not.toBe(0);expect(refused.out).toBe('');}
+      }
+      await writeFile(join(directory,name),text);
+    }
+    const rejectedDb=new Database(join(directory,'rejected','votes.sqlite'),{readonly:true});
+    try{expect(rejectedDb.query('SELECT * FROM signing_locks').all()).toEqual([]);expect(rejectedDb.query('SELECT * FROM votes').all()).toEqual([]);}finally{rejectedDb.close();}
+    // A new process with valid evidence reserves the target, then fails to open its missing seed.
+    const missingKey=await cli(0,'rejected');expect(missingKey.exit).toBe(1);expect(missingKey.out).toBe('');expect(missingKey.err).toContain('key-0');
+    await setSnapshot(b.snapshot,b.expected);
+    const conflicting=await cli(0,'rejected');expect(conflicting.exit).toBe(1);expect(conflicting.out).toBe('');expect(conflicting.err).toContain('Conflicting signing target');
+    await setSnapshot(a.snapshot);
     for(let i=0;i<keys.length;i++)await writeFile(join(directory,`key-${i}`),seeds[i],{mode:0o600});
+    const recovered=await cli(0,'rejected');expect(recovered.exit).toBe(0);expect(recovered.err).toBe('');
     const processes=await Promise.all([cli(0),cli(1)]),results=processes.map(p=>{expect(p.exit).toBe(0);expect(p.err).toBe('');return JSON.parse(p.out);});
     expect(results[0].target).toEqual(results[1].target);
+    expect(JSON.parse(recovered.out).target).toEqual(results[0].target);
+    const replayed=await replay();expect(replayed.exit).toBe(0);expect(replayed.err).toBe('');expect(JSON.parse(replayed.out).target).toEqual(results[0].target);
+    await writeFile(join(directory,'artifact'),JSON.stringify(reference));
+    const exported=await run(['src/corpus.ts',seed,'1']);expect(exported.exit).toBe(0);expect(exported.err).toBe('');
+    const mined=await run(['src/miner.ts',join(directory,'artifact')],exported.out);expect(mined.exit).toBe(0);expect(mined.err).toBe('');
+    const outputs=mined.out.trim().split('\n').map(line=>JSON.parse(line) as {id:string;findings:Finding[]});
+    expect(outputs).toHaveLength(8);expect(new Set(outputs.map(o=>o.id)).size).toBe(8);
+    expect(measure(corpus(seed,1),new Map(outputs.map(o=>[o.id,o.findings])))).toEqual(results[0].report.results[0].comparison.candidate);
     expect(results[0].vote.validator).not.toBe(results[1].vote.validator);
     const observer=new VoteJournal(join(directory,'observer'),policy);
     try{
@@ -92,6 +150,6 @@ test('independent local validator processes recompute, persist signing locks and
     await chmod(join(directory,'key-0'),0o644);const refused=await cli(0,'unsafe-seed');expect(refused.exit).toBe(1);expect(refused.out).toBe('');
     // Persisted signatures can be recovered without reopening key material.
     expect(JSON.parse((await cli(0)).out).vote).toEqual(results[0].vote);
-    console.log(JSON.stringify({event:'validator.local-independent-recomputation',processes:2,equalTargets:true,persistentSigningLocks:true,weights:null,rewards:null,hiddenEvaluation:false}));
+    console.log(JSON.stringify({event:'validator.local-recomputation',validators:2,equalTargets:true,persistentSigningLocks:true,completeCohortRevalidation:true,weights:null,rewards:null,hiddenEvaluation:false,independentOperators:false}));
   }finally{seeds.forEach(seed=>seed.fill(0));keys.forEach(key=>key.secretKey.fill(0));await rm(directory,{recursive:true,force:true});}
 },30000);

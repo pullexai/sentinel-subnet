@@ -57,19 +57,19 @@ function signature(message:Uint8Array,value:unknown,address:string){
   throw new Error('Invalid sr25519 signature');
 }
 export async function verifyChallenge(value:unknown,expected:Scope,miner:string,now:number,maxLifetimeMs:number):Promise<Challenge>{
-  await cryptoWaitReady();scope(expected);
+  value=structuredClone(value);expected=structuredClone(expected);scope(expected);
   if(!exact(value,['challenge','signature']))throw new Error('Invalid signed challenge');
   challenge(value.challenge);const c=value.challenge;
   if(!Number.isSafeInteger(now) || !Number.isSafeInteger(maxLifetimeMs) || maxLifetimeMs<1 ||
     c.genesis!==expected.genesis || c.netuid!==expected.netuid || c.round!==expected.round || c.validator!==expected.validator || c.miner!==miner ||
     now<c.issuedAt || now>=c.expiresAt || c.expiresAt-c.issuedAt>maxLifetimeMs)throw new Error('Challenge scope or validity mismatch');
-  signature(challengePayload(c),value.signature,c.validator);return c;
+  await cryptoWaitReady();signature(challengePayload(c),value.signature,c.validator);return c;
 }
 
 // Exact canonical JSON is the v1 artifact wire contract. No submitted code executes.
 function artifact(bytes:Uint8Array):Submission{
   if(bytes.length>65536)throw new Error('Artifact limit exceeded');
-  const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes),value=admit(JSON.parse(text));
+  const text=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes),value=admit(JSON.parse(text));
   const canonical=JSON.stringify({schema:value.schema,rules:value.rules.map(r=>({id:r.id,literal:r.literal}))});
   if(text!==canonical)throw new Error('Noncanonical artifact');
   return JSON.parse(canonical);
@@ -83,9 +83,10 @@ export async function evaluateSnapshot(bytes:Uint8Array,expected:SnapshotExpecta
     !exact(expected.scope,['genesis','netuid','round','validator']) || !Array.isArray(expected.eligible) || expected.eligible.length<1 || expected.eligible.length>10000 ||
     expected.eligible.some(v=>!hotkey(v)) || new Set(expected.eligible).size!==expected.eligible.length)throw new Error('Invalid snapshot expectations');
   scope(expected.scope);
-  const expectations=structuredClone(expected),input=Buffer.from(bytes);
+  // Keep the baseline checked here through crypto readiness and fixture execution.
+  const expectations=structuredClone(expected),input=Buffer.from(bytes),baseline=structuredClone(admit(reference));
   if(sha256(input)!==expectations.cohortSha256)throw new Error('Snapshot digest mismatch');
-  const text=new TextDecoder('utf-8',{fatal:true}).decode(input),value=JSON.parse(text);
+  const text=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(input),value=JSON.parse(text);
   if(JSON.stringify(value)!==text || !exact(value,['schema','scope','seed','pairs','salt','contract','generator','fixtureSha256','baseline','scorer','eligible','closedAt','contributions',...(expectations.chain?['chain']:[])]))throw new Error('Invalid snapshot schema or noncanonical JSON');
   const f=value as unknown as FrozenPractice;
   if(f.schema!==(expectations.chain?'sentinel-frozen-practice/v3':'sentinel-frozen-practice/v2') || !exact(f.scope,['genesis','netuid','round','validator']) ||
@@ -93,7 +94,7 @@ export async function evaluateSnapshot(bytes:Uint8Array,expected:SnapshotExpecta
     !Array.isArray(f.eligible) || JSON.stringify(f.eligible)!==JSON.stringify([...expectations.eligible].sort()) ||
     !Number.isSafeInteger(f.closedAt) || f.closedAt<0 || !Array.isArray(f.contributions) || f.contributions.length<1 || f.contributions.length>100)throw new Error('Snapshot scope or cohort mismatch');
   if(practiceRound(f.contract)!==f.scope.round || practiceRound(practiceContract(f.seed,f.salt,f.pairs))!==f.scope.round ||
-    f.generator!=='sentinel-corpus/v1' || f.scorer!=='sentinel-pareto/v1' || f.baseline!==executionIdentity(reference) ||
+    f.generator!=='sentinel-corpus/v1' || f.scorer!=='sentinel-pareto/v1' || f.baseline!==executionIdentity(baseline) ||
     f.fixtureSha256!==sha256(Buffer.from(JSON.stringify(corpus(f.seed,f.pairs)))))throw new Error('Snapshot benchmark mismatch');
   if(expectations.chain){
     if(!exact(expectations.chain,['policy','approval']) || !exact(f.chain,['policy','approval','observation']) || typeof f.chain!.observation!=='string' ||
@@ -120,7 +121,7 @@ export async function evaluateSnapshot(bytes:Uint8Array,expected:SnapshotExpecta
     miners.add(c.miner);nonces.add(c.nonce);
   }
   const {evaluateCohort}=await import('./validator');
-  const report=await evaluateCohort(f.seed,f.pairs,f.contributions.map(c=>({participant:c.miner,submission:c.submission})));
+  const report=await evaluateCohort(f.seed,f.pairs,f.contributions.map(c=>({participant:c.miner,submission:c.submission})),baseline);
   return {...report,cohortSha256:expectations.cohortSha256,closedAt:f.closedAt,commitment:f.contract,reveal:{seed:f.seed,salt:f.salt},
     authentication:{scheme:'sr25519',scope:expectations.scope,eligibility:expectations.chain?'operator-approved-rpc-observed-registration':'legacy-operator-supplied-hotkey-list',...(expectations.chain?{chain:expectations.chain,evidenceUse:'historical-replay',currentEligibility:'not-assessed',revocationStatus:'not-assessed'}: {})},
     limitation:'Signed public-template practice. Chain evidence, when required, is operator-approved RPC observation, not independent finality or economic eligibility. Validator independence and hidden generalization unqualified. No weights or rewards.'};
@@ -222,13 +223,13 @@ export class ContributionInbox{
     }).immediate();
   }
   async accept(value:unknown,bytes:Uint8Array){
-    await cryptoWaitReady();
     if(!(bytes instanceof Uint8Array) || bytes.length>65536)throw new Error('Artifact limit exceeded');
+    bytes=Buffer.from(bytes);value=structuredClone(value);
     if(!exact(value,['schema','challenge','artifactSha256','signature']) || value.schema!=='sentinel-contribution/v1')throw new Error('Invalid contribution');
     challenge(value.challenge);const c=value.challenge,digest=sha256(bytes);
     if(!this.miners.has(c.miner) || value.artifactSha256!==digest)throw new Error('Ineligible hotkey or artifact mismatch');
     const submission=artifact(bytes),payload=contributionPayload(c,digest);
-    signature(payload,value.signature,c.miner);
+    await cryptoWaitReady();signature(payload,value.signature,c.miner);
     return this.db.transaction(()=>{
       this.ensureChain();
       this.committedPractice();
@@ -309,6 +310,7 @@ export class ContributionInbox{
     if(!stored)throw new Error('Close practice cohort before evaluation');
     if(sha256(Buffer.from(stored.body))!==stored.digest)throw new Error('Frozen practice integrity failure');
     const frozen=JSON.parse(stored.body) as FrozenPractice;
+    if(JSON.stringify(frozen)!==stored.body)throw new Error('Frozen practice noncanonical JSON');
     this.committedPractice(false);
     if(practiceRound(frozen.contract)!==this.policy.round || practiceRound(practiceContract(frozen.seed,frozen.salt,frozen.pairs))!==this.policy.round)throw new Error('Frozen practice commitment mismatch');
     if(JSON.stringify(frozen.eligible)!==JSON.stringify([...this.miners].sort()))throw new Error('Frozen practice eligibility conflict');
