@@ -24,3 +24,24 @@ print(json.dumps({'publicKey':public.hex(),'signature':sr25519.sign((public,priv
   const result=JSON.parse(output);
   expect(sr25519Verify(message,Buffer.from(result.signature,'hex'),Buffer.from(result.publicKey,'hex'))).toBe(true);
 });
+
+test.skipIf(!process.env.SR25519_PYTHON)('native Python verifies EC-02 envelope and recomputes JCS bytes independently',async()=>{
+  await cryptoWaitReady();
+  const {contributionSigningBytes}=await import('../src/engine-contribution');
+  const pair=sr25519PairFromSeed(randomBytes(32)),hotkey=Buffer.from(pair.publicKey).toString('hex');
+  const payload=JSON.parse(await Bun.file(import.meta.dir+'/fixtures/engine-contribution-payload.json').text());
+  payload.submitter.hotkey_public_key=hotkey;
+  const message=contributionSigningBytes(payload),signed=Buffer.from(sr25519Sign(message,pair)).toString('hex');
+  // Python json.dumps(sort_keys, compact, ensure_ascii=False) equals JCS for this ASCII, string-only payload.
+  const child=Bun.spawn([process.env.SR25519_PYTHON!,'-c',`
+import json,sys,sr25519
+v=json.load(sys.stdin)
+m=b'sentinel-engine-contribution/v1\\n'+json.dumps(v['payload'],sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
+assert m.hex()==v['message'],'JCS mismatch'
+assert sr25519.verify(bytes.fromhex(v['signature']),m,bytes.fromhex(v['payload']['submitter']['hotkey_public_key']))
+print('ok')
+`],{stdin:'pipe',stdout:'pipe',stderr:'pipe'});
+  child.stdin.write(JSON.stringify({payload,message:message.toString('hex'),signature:signed}));child.stdin.end();
+  expect((await new Response(child.stdout).text()).trim()).toBe('ok');
+  expect(await child.exited).toBe(0);
+});

@@ -1,4 +1,5 @@
 import { cryptoWaitReady,decodeAddress,encodeAddress,sr25519Verify } from '@polkadot/util-crypto';
+import { jcs } from './jcs';
 import { sha256,type ContributionInbox } from './protocol';
 
 export type ScoreTarget={genesis:string;netuid:number;round:string;cohortSha256:string;resultSha256:string};
@@ -27,13 +28,8 @@ export function quorumPolicyDigest(value:unknown){
   return sha256(Buffer.from('sentinel/quorum-policy/v1\n'+JSON.stringify([[...value.validators].sort(),value.threshold])));
 }
 // Sorted object keys; preserve array order because tiers and contribution order are meaningful.
-export function canonical(value:unknown):string{
-  if(value===null || typeof value==='boolean' || typeof value==='string')return JSON.stringify(value);
-  if(typeof value==='number' && Number.isFinite(value))return JSON.stringify(value);
-  if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';
-  if(value && typeof value==='object' && Object.getPrototypeOf(value)===Object.prototype)return '{'+Object.keys(value).sort().map(k=>JSON.stringify(k)+':'+canonical((value as Record<string,unknown>)[k])).join(',')+'}';
-  throw new Error('Non-JSON deterministic result');
-}
+// Byte-identical to the former serializer for all well-formed inputs; now also rejects lone surrogates.
+export const canonical=jcs;
 // Use on a locally recomputed report, not as an assertion that received scores are correct.
 export function scoreTarget(report:Awaited<ReturnType<ContributionInbox['evaluatePractice']>>):ScoreTarget{
   const result={schema:report.schema,comparisonId:report.comparisonId,generator:report.generator,seed:report.seed,pairs:report.pairs,cases:report.cases,

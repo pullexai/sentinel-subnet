@@ -1,0 +1,97 @@
+{
+  "protocol": "sentinel-engine-contribution/v1",
+  "network": {
+    "genesis_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "subnet_creation_block_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "subnet_creation_height": "123",
+    "subnet_owner_public_key": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "netuid": "42",
+    "mechanism_id": "0"
+  },
+  "submitter": {
+    "hotkey_public_key": "0000000000000000000000000000000000000000000000000000000000000000",
+    "registration_block_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "registration_height": "200"
+  },
+  "window_id": "w-2026-10",
+  "policy_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "baseline_bundle_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "lane": "detection",
+  "format": {
+    "id": "structural-rule/v1",
+    "schema_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "artifact": {
+    "files": [
+      {
+        "path": "LICENSE",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "bytes": "1069",
+        "media_type": "text/plain",
+        "role": "license"
+      },
+      {
+        "path": "rules.json",
+        "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "bytes": "42",
+        "media_type": "application/json",
+        "role": "entrypoint"
+      }
+    ],
+    "files_sha256": "371893f89b5c74ba1305a8c440f8550a95620947f7c977d2b259458983abedc0",
+    "entrypoint": "rules.json"
+  },
+  "origins": [
+    {
+      "origin_id": "github",
+      "immutable_revision": "0123abc",
+      "file_path": "rules/x.json",
+      "artifact_path": "rules.json"
+    }
+  ],
+  "components": [
+    {
+      "role": "engine",
+      "component_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    {
+      "role": "grammar",
+      "component_sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    }
+  ],
+  "change": {
+    "slot": "rules",
+    "operation": "add_rules",
+    "replaces_sha256": null
+  },
+  "capabilities": {
+    "languages": [
+      "python",
+      "typescript"
+    ],
+    "build_variants": [
+      "default"
+    ],
+    "categories": [
+      "injection"
+    ],
+    "analysis_profile_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "scope": "file"
+  },
+  "execution_profile_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+  "output_schema_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+  "provenance": {
+    "license_expression": "MIT",
+    "license_files": [
+      "LICENSE"
+    ],
+    "source_revisions": [
+      "0123abc"
+    ],
+    "derived_from": [],
+    "training_data_statement_sha256": null
+  },
+  "nonce": "18446744073709551615",
+  "issued_at": "1790000000",
+  "expires_at": "1790000600"
+}

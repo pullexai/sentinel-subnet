@@ -1,0 +1,4 @@
+Files in input/ and output/ are copied unmodified from https://github.com/cyberphone/json-canonicalization
+(testdata/, commit 19d51d7fe467d4706a3ff08adf8a748f29fc21e0).
+Copyright 2018 Anders Rundgren. Licensed under the Apache License, Version 2.0:
+https://www.apache.org/licenses/LICENSE-2.0

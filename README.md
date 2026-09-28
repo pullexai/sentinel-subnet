@@ -49,6 +49,8 @@ An explicitly selected `sentinel-quorum-policy/v2` additionally pins a maximum f
 
 [TRANSCRIPTS.md](TRANSCRIPTS.md) adds `bun run validator:transcript`: a separate v2 complete-execution-roster practice lane. It captures actual baseline/candidate tuple outputs, commits salted signed transcripts, requires a unanimously signed full commitment list before opening, and certifies only the full authenticated transcript set. Each local validator has a durable phase-lock journal; missing, invalid, late or conflicting evidence cannot produce a subset certificate. This bounded single-trial deterministic profile supplies neither hidden evaluation, independent operators nor EC-02/08 completion.
 
+[ENGINE-CONTRIBUTION.md](ENGINE-CONTRIBUTION.md) implements the EC-02 `sentinel-engine-contribution/v1` `{payload, signature}` envelope: dependency-free RFC 8785 JCS with official vectors, strict duplicate/noncanonical rejection, domain-separated sr25519 signing, contribution ID and a durable nonce fence. Existing practice formats remain legacy practice-only and byte-compatible.
+
 [HOLDOUT.md](HOLDOUT.md) adds `bun run holdout`: an independent owner signs a salted holdout-bank commitment before intake; miners verify it; validators open the bank after closure, reject public-template overlap/leakage and lying oracles, and emit a reproducible holdout ranking with a `memorizationSuspect` flag. `bun run check`: **16 tests / 1,150 assertions**. Owner/coordinator clocks are unwitnessed and owner independence is a governance assumption.
 
 ### Authenticated contribution increment
