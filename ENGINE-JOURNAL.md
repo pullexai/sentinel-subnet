@@ -22,6 +22,13 @@ Exact reduced `bigint` rationals. `cellLoss` sums policy costs times missed/posi
 
 `clonePartition` unions by exact execution-content identity and by exactly equal full behavior vectors `(validator, case, trial, canonical_output, status, coverage)` hashed with the profile; candidate identity, signatures, salts, timing and confidence are excluded. No tolerance, rounding or chained similarity. Only a `certified` transcript set yields behavior classes; otherwise, or when any scheduled tuple is missing for an execution, that execution stays in its exact-content class. Members sort by receipt sequence; a duplicate sequence is `class_disputed`. The class ID binds window, profile, transcript-set root and member executions; the result is independent of input order. `transcriptSetRoot` sorts by raw key bytes, then numeric trial index, and rejects duplicate tuples.
 
+## Journaled window (`src/engine-window.ts`)
+
+- `openWindow` freezes the queued intake contributions (fetch, seal, profile admission), schedules `(execution_content_id, case_input_id, trial_index)` tuples with `scheduleRound` (baseline included, exact-content duplicates aliased) and writes `window_open`, `intake`, `rejection` and `freeze` events. A null beacon throws `policy_unresolved` before anything is written.
+- `workTuple` leases one tuple, runs the sealed artifact in the existing sandbox on that single case, re-validates the output and records it with `complete`. Artifact failures are recorded as `rejected` outputs; a crashed worker leaves its lease to expire and the next worker re-leases it, up to `max_infra_retries`, after which the tuple is `incomplete`.
+- `windowReport` reports only journal outcomes: window root, `roundStatus`, per-trial EC-09 loss inputs (loss stays `policy_unresolved` without signed costs), point gain against the baseline, and EC-10 classes by exact content (behavior classes need a quorum-certified transcript set).
+- `tests/engine-window.test.ts` kills a worker process during a lease and resumes it, verifies the export offline (library and CLI), detects a forged output, and gets the same root from two independent runs.
+
 ## Explicitly not verified here
 
 Beacon availability, witness confirmation of checkpoints and receipt order, quorum certificates and commitment/opening exchange between roster validators, independent operators, finalized chain state, signed policy values (costs, bounds, retries, roster), bootstrap uncertainty and lane shares, product release keys, public reveal. Each surfaces as `policy_unresolved` or `unverified_*`, never as success.
